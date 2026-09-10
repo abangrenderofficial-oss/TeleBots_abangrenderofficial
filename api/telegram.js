@@ -1,5 +1,5 @@
 import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
-import { buildCaption, generateTitle } from '../lib/caption.js';
+import { buildCaption, generateTitle, interpretTitleTeaching } from '../lib/caption.js';
 import { chatAssistant } from '../lib/assistant.js';
 import { telegramTextToHtml } from '../lib/entities.js';
 import {
@@ -46,9 +46,7 @@ async function handleMessage(message) {
 
   if (!isAdminMessage(message)) return;
 
-  if (text === '/start' || text === '/help') {
-    return sendHelp(chatId);
-  }
+  if (text === '/start' || text === '/help') return sendHelp(chatId);
 
   if (text === '/stats') {
     const s = await stats();
@@ -59,13 +57,8 @@ async function handleMessage(message) {
     });
   }
 
-  if (text === '/pending') {
-    return sendPending(chatId);
-  }
-
-  if (text === '/memories') {
-    return sendMemories(chatId);
-  }
+  if (text === '/pending') return sendPending(chatId);
+  if (text === '/memories') return sendMemories(chatId);
 
   if (text === '/remember') {
     return telegram('sendMessage', {
@@ -115,7 +108,7 @@ async function handleMessage(message) {
     await setSetting('admin_state', { mode: 'SET_CAPTION' });
     return telegram('sendMessage', {
       chat_id: chatId,
-      text: 'Send the footer exactly as you want it. Telegram hidden links, bold and italic formatting will be saved.',
+      text: 'Send footer tepat macam yang kau nak. Hidden link, bold dan italic Telegram akan disimpan.',
     });
   }
 
@@ -123,11 +116,12 @@ async function handleMessage(message) {
     await setSetting('admin_state', { mode: 'SET_RULES' });
     return telegram('sendMessage', {
       chat_id: chatId,
-      text: 'Send your title rules in normal language. I will save them as the permanent title instructions.',
+      text: 'Terangkan rules tajuk dalam bahasa biasa. Aku akan simpan sebagai arahan tetap.',
     });
   }
 
   const state = await getSetting('admin_state');
+
   if (state?.mode === 'SET_CAPTION' && text) {
     const html = telegramTextToHtml(message.text, message.entities || []);
     await setSetting('caption_footer_html', html);
@@ -136,22 +130,22 @@ async function handleMessage(message) {
       chat_id: chatId,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
-      text: `<b>Caption footer saved.</b>\n\n${html}`,
+      text: `<b>✅ Footer disimpan.</b>\n\n${html}`,
     });
   }
 
   if (state?.mode === 'SET_RULES' && text) {
     await setSetting('title_rules', text);
     await setSetting('admin_state', null);
-    return telegram('sendMessage', {
-      chat_id: chatId,
-      text: '✅ Title rules saved.',
-    });
+    return telegram('sendMessage', { chat_id: chatId, text: '✅ Rules tajuk dah disimpan.' });
   }
 
   if (state?.mode === 'EDIT_TITLE' && text && state.item_id) {
     const item = await getQueueItem(state.item_id);
-    if (!item) return;
+    if (!item) {
+      await setSetting('admin_state', null);
+      return telegram('sendMessage', { chat_id: chatId, text: 'Item tu dah tak jumpa. Cuba /pending.' });
+    }
     const finalCaption = await buildCaption(text);
     await updateQueueItem(item.id, {
       generated_title: text,
@@ -162,28 +156,50 @@ async function handleMessage(message) {
     await setSetting('admin_state', null);
     await telegram('sendMessage', {
       chat_id: chatId,
-      text: '✅ Title updated. Open /pending or use the latest preview to send it.',
+      text: `✅ Tajuk dah ditukar kepada:\n\n${text}\n\nAku keluarkan preview baru di bawah.`,
     });
     return sendPreview(item.id, chatId);
   }
 
   if (state?.mode === 'TEACH_TITLE' && text && state.item_id) {
     const item = await getQueueItem(state.item_id);
-    if (!item) return;
-    await saveExample(item.original_caption || item.file_name || '', text);
-    const finalCaption = await buildCaption(text);
-    await updateQueueItem(item.id, {
-      generated_title: text,
-      final_caption_html: finalCaption,
-      status: 'READY',
-      caption_replaced: true,
-    });
-    await setSetting('admin_state', null);
+    if (!item) {
+      await setSetting('admin_state', null);
+      return telegram('sendMessage', { chat_id: chatId, text: 'Item tu dah tak jumpa. Cuba /pending.' });
+    }
+
     await telegram('sendMessage', {
       chat_id: chatId,
-      text: '🧠 Correction saved as a teaching example and this item was updated.',
+      text: '🧠 Okay, aku baca contoh/arahan kau dulu. Aku tak akan simpan terus sampai kau confirm.',
     });
-    return sendPreview(item.id, chatId);
+
+    const interpreted = await interpretTitleTeaching({
+      originalCaption: item.original_caption || '',
+      fileName: item.file_name || '',
+      currentTitle: item.generated_title || '',
+      ownerInstruction: text,
+    });
+
+    const pending = {
+      item_id: item.id,
+      owner_input: text,
+      corrected_title: interpreted.correctedTitle,
+      rule_summary: interpreted.ruleSummary,
+    };
+    await setSetting(pendingTeachingKey(chatId), pending);
+    await setSetting('admin_state', null);
+
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: `Aku faham macam ni:\n\nTajuk yang sepatutnya:\n${interpreted.correctedTitle}\n\nApa yang aku belajar:\n${interpreted.ruleSummary}\n\nBetul macam ni?`,
+      reply_markup: inlineKeyboard([
+        [
+          { text: '✅ BETUL, SIMPAN', callback_data: `teachconfirm:${item.id}` },
+          { text: '✏️ AJAR SEMULA', callback_data: `teachretry:${item.id}` },
+        ],
+        [{ text: '❌ BATAL', callback_data: `teachcancel:${item.id}` }],
+      ]),
+    });
   }
 
   if (hasMedia(message)) return prepareMedia(message);
@@ -307,18 +323,94 @@ async function handleCallback(query) {
   const [action, id] = data.split(':');
   if (!id) return;
 
+  if (action === 'teachconfirm') {
+    const pending = await getSetting(pendingTeachingKey(chatId));
+    if (!pending || pending.item_id !== id || !pending.corrected_title) {
+      return telegram('sendMessage', { chat_id: chatId, text: 'Teaching confirmation dah expired. Tekan TEACH THIS semula.' });
+    }
+
+    const item = await getQueueItem(id);
+    if (!item) return telegram('sendMessage', { chat_id: chatId, text: 'Item dah tak jumpa.' });
+
+    await saveExample(item.original_caption || item.file_name || '', pending.corrected_title);
+
+    if (pending.rule_summary) {
+      const current = await getSetting('learned_title_rules');
+      const rules = Array.isArray(current) ? current : [];
+      const normalized = pending.rule_summary.trim();
+      if (normalized && !rules.some((r) => String(r).toLowerCase() === normalized.toLowerCase())) {
+        await setSetting('learned_title_rules', [...rules, normalized].slice(-30));
+      }
+    }
+
+    const finalCaption = await buildCaption(pending.corrected_title);
+    await updateQueueItem(id, {
+      generated_title: pending.corrected_title,
+      final_caption_html: finalCaption,
+      status: 'READY',
+      caption_replaced: true,
+    });
+    await setSetting(pendingTeachingKey(chatId), null);
+
+    await telegram('editMessageReplyMarkup', {
+      chat_id: chatId,
+      message_id: message.message_id,
+      reply_markup: inlineKeyboard([[{ text: '🧠 TEACHING SAVED', callback_data: 'noop' }]]),
+    }).catch(() => {});
+
+    await telegram('sendMessage', {
+      chat_id: chatId,
+      text: `✅ Faham. Aku dah simpan contoh + rule tu.\n\nTajuk item ini sekarang:\n${pending.corrected_title}\n\nAku keluarkan preview baru di bawah.`,
+    });
+    return sendPreview(id, chatId);
+  }
+
+  if (action === 'teachretry') {
+    await setSetting(pendingTeachingKey(chatId), null);
+    await setSetting('admin_state', { mode: 'TEACH_TITLE', item_id: id });
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: 'Okay. Terangkan apa yang salah atau paste contoh hasil yang kau nak. Tak perlu bagi title sahaja — kau boleh cakap macam chat biasa.',
+    });
+  }
+
+  if (action === 'teachcancel') {
+    await setSetting(pendingTeachingKey(chatId), null);
+    await setSetting('admin_state', null);
+    await telegram('editMessageReplyMarkup', {
+      chat_id: chatId,
+      message_id: message.message_id,
+      reply_markup: inlineKeyboard([[{ text: '❌ TEACHING CANCELLED', callback_data: 'noop' }]]),
+    }).catch(() => {});
+    return;
+  }
+
   if (action === 'send') return sendItem(id, chatId);
+
   if (action === 'skip') {
     await updateQueueItem(id, { status: 'SKIPPED' });
-    return telegram('editMessageReplyMarkup', { chat_id: chatId, message_id: message.message_id, reply_markup: inlineKeyboard([[{ text: '⏭ SKIPPED', callback_data: 'noop' }]]) });
+    return telegram('editMessageReplyMarkup', {
+      chat_id: chatId,
+      message_id: message.message_id,
+      reply_markup: inlineKeyboard([[{ text: '⏭ SKIPPED', callback_data: 'noop' }]]),
+    });
   }
+
   if (action === 'edit') {
     await setSetting('admin_state', { mode: 'EDIT_TITLE', item_id: id });
-    return telegram('sendMessage', { chat_id: chatId, text: 'Send the corrected title for this item.' });
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: 'Hantar tajuk tepat yang kau nak. Mode EDIT tak belajar rule — dia cuma tukar title item ini.',
+    });
   }
+
   if (action === 'teach') {
+    await setSetting(pendingTeachingKey(chatId), null);
     await setSetting('admin_state', { mode: 'TEACH_TITLE', item_id: id });
-    return telegram('sendMessage', { chat_id: chatId, text: 'Teach me the correct title. Send only the title you want.' });
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: '🧠 Ajar aku macam chat biasa. Terangkan apa yang salah, apa yang patut dibuang/dikekalkan, atau paste contoh hasil akhir. Aku akan tafsir dulu dan minta confirmation sebelum simpan.',
+    });
   }
 }
 
@@ -328,7 +420,7 @@ async function sendItem(id, chatId) {
 
   const destination = (await getSetting('destination_chat_id')) || process.env.DESTINATION_CHAT_ID;
   if (!destination) {
-    return telegram('sendMessage', { chat_id: chatId, text: '⚠️ Destination is not configured yet.' });
+    return telegram('sendMessage', { chat_id: chatId, text: '⚠️ Destination belum configured.' });
   }
 
   try {
@@ -421,6 +513,10 @@ function pendingMemoryKey(chatId) {
   return `pending_ai_memory:${chatId}`;
 }
 
+function pendingTeachingKey(chatId) {
+  return `pending_title_teaching:${chatId}`;
+}
+
 function hasMedia(message) {
   return Boolean(message.document || message.photo || message.video || message.animation || message.audio);
 }
@@ -441,6 +537,6 @@ async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
     parse_mode: 'HTML',
-    text: `<b>Abang Render Coordinator</b>\n\nAku sekarang juga AI chat assistant. Kau boleh chat biasa dan aku akan guna recent chat + long-term memory + keadaan queue untuk jawab.\n\n/setcaption — save permanent footer with clickable links\n/setrules — save title extraction & translation rules\n/stats — file totals (photos excluded)\n/pending — show unsent items\n/remember &lt;text&gt; — save long-term memory\n/memories — view saved memories\n/forget &lt;ID&gt; — delete a memory\n/clearchat — clear AI chat history only\n/whoami — show your Telegram user ID\n/help — show this menu`,
+    text: `<b>Abang Render Coordinator</b>\n\nAku juga AI chat assistant. Kau boleh chat biasa dan aku akan guna recent chat + long-term memory + keadaan queue untuk jawab.\n\n/setcaption — save permanent footer with clickable links\n/setrules — save title extraction & translation rules\n/stats — file totals (photos excluded)\n/pending — show unsent items\n/remember &lt;text&gt; — save long-term memory\n/memories — view saved memories\n/forget &lt;ID&gt; — delete a memory\n/clearchat — clear AI chat history only\n/whoami — show your Telegram user ID\n/help — show this menu`,
   });
 }
