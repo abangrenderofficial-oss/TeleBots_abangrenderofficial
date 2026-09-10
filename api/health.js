@@ -5,6 +5,8 @@ export default function handler(req, res) {
     telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
     adminConfigured: Boolean(process.env.ADMIN_TELEGRAM_ID),
     supabaseConfigured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
-    aiConfigured: Boolean(process.env.OPENAI_API_KEY),
+    aiConfigured: Boolean(process.env.GEMINI_API_KEY),
+    aiProvider: process.env.GEMINI_API_KEY ? 'gemini' : null,
+    aiModel: process.env.GEMINI_MODEL || 'gemini-3.7-flash',
   });
 }
