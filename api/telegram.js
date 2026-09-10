@@ -16,6 +16,13 @@ import {
   toggleFormatOption,
 } from '../lib/format-profiles.js';
 import {
+  addFormatRemoveTerms,
+  applyFormatRemoveTerms,
+  clearFormatRemoveTerms,
+  getFormatRemoveTerms,
+  removeWordButtonLabel,
+} from '../lib/remove-words.js';
+import {
   addMemory,
   clearChatHistory,
   createQueueItem,
@@ -30,7 +37,7 @@ import {
   updateQueueItem,
 } from '../lib/store.js';
 
-const BUILD_VERSION = 'format-learning-v1-kl-chat';
+const BUILD_VERSION = 'format-learning-v2-remove-word';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(200).json({ ok: true });
@@ -103,7 +110,6 @@ async function handleMessage(message) {
     });
   }
 
-  // Backup global footer editor.
   if (text === '/setcaption') {
     await setSetting('admin_state', { mode: 'SET_CAPTION' });
     return telegram('sendMessage', {
@@ -113,6 +119,26 @@ async function handleMessage(message) {
   }
 
   const state = await getSetting('admin_state');
+
+  if (state?.mode === 'ADD_FORMAT_REMOVE_WORDS' && text) {
+    const item = await getQueueItem(state.item_id);
+    const profile = await getFormatProfile(state.profile_id);
+    if (!item || !profile) {
+      await setSetting('admin_state', null);
+      return telegram('sendMessage', { chat_id: chatId, text: 'Item atau format tu dah tak jumpa.' });
+    }
+
+    if (/^(?:clear|reset|padam semua|buang semua)$/i.test(text)) {
+      await clearFormatRemoveTerms(profile.id);
+    } else {
+      await addFormatRemoveTerms(profile.id, text);
+    }
+
+    await reprocessItemWithProfile(item.id, profile);
+    await keepFocus(item.id);
+    await deleteHelperPrompt(chatId, state.prompt_message_id);
+    return sendPreview(item.id, chatId);
+  }
 
   if (state?.mode === 'EDIT_FORMAT_FOOTER' && text) {
     const item = await getQueueItem(state.item_id);
@@ -126,10 +152,7 @@ async function handleMessage(message) {
     const updatedProfile = await setFormatFooter(profile.id, html);
     await reprocessItemWithProfile(item.id, updatedProfile);
     await keepFocus(item.id);
-    await telegram('sendMessage', {
-      chat_id: chatId,
-      text: `Okay. Caption ni aku simpan khas untuk ${updatedProfile.name}. Lepas ni format sama aku pakai terus.`,
-    });
+    await deleteHelperPrompt(chatId, state.prompt_message_id);
     return sendPreview(item.id, chatId);
   }
 
@@ -142,7 +165,6 @@ async function handleMessage(message) {
       const finalCaption = await buildCaption(item.generated_title || 'Untitled');
       await updateQueueItem(item.id, { final_caption_html: finalCaption, caption_replaced: true });
       await keepFocus(item.id);
-      await telegram('sendMessage', { chat_id: chatId, text: 'Okay, caption global dah simpan dan apply dekat item ni.' });
       return sendPreview(item.id, chatId);
     }
 
@@ -170,7 +192,6 @@ async function handleAgentText(chatId, message, state) {
   });
 
   if (result.focusedItemId) await keepFocus(result.focusedItemId);
-
   if (result.reply) await sendAiReplyBubbles(chatId, result.reply);
 
   for (const effect of result.effects || []) {
@@ -247,6 +268,11 @@ async function keepFocus(itemId) {
   return setSetting('admin_state', { mode: 'FOCUS_ITEM', item_id: itemId });
 }
 
+async function deleteHelperPrompt(chatId, messageId) {
+  if (!messageId) return;
+  await telegram('deleteMessage', { chat_id: chatId, message_id: messageId }).catch(() => {});
+}
+
 async function prepareMedia(message) {
   const media = identifyMedia(message);
   const duplicateInput = {
@@ -258,7 +284,6 @@ async function prepareMedia(message) {
     fileName: media.fileName || '',
   };
 
-  // Exact duplicate only auto-deletes if the old record really reached SENT.
   const beforeAi = await inspectIncomingDuplicate(duplicateInput);
   if (beforeAi.kind === 'webhook_replay') return;
   if (beforeAi.kind === 'exact_file') return handleExactDuplicate(message, beforeAi);
@@ -269,15 +294,16 @@ async function prepareMedia(message) {
     mediaKind: media.kind,
   });
 
-  const processed = await processMediaWithProfile({
+  const baseProcessed = await processMediaWithProfile({
     caption: message.caption || '',
     fileName: media.fileName || '',
     profile: resolved.profile,
   });
+  const processed = await applyFormatRemoveTerms(resolved.profile.id, baseProcessed);
 
   const duplicateResult = await inspectIncomingDuplicate({
     ...duplicateInput,
-    generatedTitle: processed.title,
+    generatedTitle: processed.title || '',
   });
   if (duplicateResult.kind === 'webhook_replay') return;
   if (duplicateResult.kind === 'exact_file') return handleExactDuplicate(message, duplicateResult);
@@ -305,7 +331,7 @@ async function prepareMedia(message) {
   if (resolved.isNew) {
     await telegram('sendMessage', {
       chat_id: message.chat.id,
-      text: `${resolved.profile.name} baru aku detect. Button dekat preview ni khas untuk format ni. Kau ON/OFF sekali, lepas ni format sama aku ingat sendiri.`,
+      text: `${resolved.profile.name} baru aku detect. Setting dekat preview ni khas untuk format ni. Kau ajar sekali, format sama lepas ni aku ingat.`,
     });
   }
 
@@ -347,11 +373,12 @@ async function reprocessItemWithProfile(itemId, profile) {
   const item = await getQueueItem(itemId);
   if (!item) throw new Error('Item tak jumpa');
 
-  const processed = await processMediaWithProfile({
+  const baseProcessed = await processMediaWithProfile({
     caption: item.original_caption || '',
     fileName: item.file_name || '',
     profile,
   });
+  const processed = await applyFormatRemoveTerms(profile.id, baseProcessed);
 
   return updateQueueItem(item.id, {
     generated_title: processed.title || null,
@@ -366,16 +393,30 @@ async function sendPreview(itemId, chatId) {
   if (!item) return;
 
   const profile = await getProfileForItem(item);
+  const removeTerms = await getFormatRemoveTerms(profile.id);
+  const rows = formatProfileKeyboardRows(profile, item.id);
+  rows.splice(Math.max(0, rows.length - 1), 0, [
+    { text: removeWordButtonLabel(removeTerms), callback_data: `fmt_removeword:${item.id}` },
+  ]);
+
+  // Satu item cuma boleh ada satu preview aktif. Kalau preview lama ada,
+  // delete dulu sebelum keluarkan preview terbaru.
+  if (item.preview_message_id) {
+    await telegram('deleteMessage', {
+      chat_id: chatId,
+      message_id: item.preview_message_id,
+    }).catch(() => {});
+  }
+
   const payload = {
     chat_id: chatId,
     from_chat_id: item.source_chat_id,
     message_id: item.source_message_id,
     parse_mode: 'HTML',
     disable_notification: true,
-    reply_markup: inlineKeyboard(formatProfileKeyboardRows(profile, item.id)),
+    reply_markup: inlineKeyboard(rows),
   };
-  if (item.final_caption_html) payload.caption = item.final_caption_html;
-  else payload.caption = '';
+  payload.caption = item.final_caption_html || '';
 
   const copied = await telegram('copyMessage', payload);
   await updateQueueItem(item.id, { preview_message_id: copied.message_id });
@@ -403,16 +444,34 @@ async function handleCallback(query) {
     const profile = await getProfileForItem(item);
     if (!profile) return telegram('sendMessage', { chat_id: chatId, text: 'Format profile tak jumpa.' });
 
-    if (action === 'fmt_editfooter') {
+    if (action === 'fmt_removeword') {
+      const prompt = await telegram('sendMessage', {
+        chat_id: chatId,
+        text: `Send word/ayat yang ${profile.name} wajib buang. Kalau banyak, satu line satu. Kalau nak kosongkan semua, send “clear”.`,
+      });
+      await setSetting('admin_state', {
+        mode: 'ADD_FORMAT_REMOVE_WORDS',
+        item_id: item.id,
+        profile_id: profile.id,
+        prompt_message_id: prompt?.message_id || null,
+      });
+      return;
+    }
+
+    // Tambah Caption dan Ubah Caption dua-dua minta text daripada owner,
+    // kemudian hasilnya terus masuk dalam preview media, bukan bubble chat.
+    if (action === 'fmt_footer' || action === 'fmt_editfooter') {
+      const prompt = await telegram('sendMessage', {
+        chat_id: chatId,
+        text: `Send caption yang kau nak letak bawah tajuk untuk ${profile.name}.`,
+      });
       await setSetting('admin_state', {
         mode: 'EDIT_FORMAT_FOOTER',
         item_id: item.id,
         profile_id: profile.id,
+        prompt_message_id: prompt?.message_id || null,
       });
-      return telegram('sendMessage', {
-        chat_id: chatId,
-        text: `Send caption yang kau nak simpan untuk ${profile.name}. Lepas ni format sama aku tambah caption ni automatik.`,
-      });
+      return;
     }
 
     const option = profileOptionFromCallback(action);
@@ -421,14 +480,6 @@ async function handleCallback(query) {
     const updatedProfile = await toggleFormatOption(profile.id, option);
     await reprocessItemWithProfile(item.id, updatedProfile);
     await keepFocus(item.id);
-
-    // Disable the old control panel so only the newest preview is authoritative.
-    await telegram('editMessageReplyMarkup', {
-      chat_id: chatId,
-      message_id: message.message_id,
-      reply_markup: inlineKeyboard([[{ text: `${updatedProfile.name} updated`, callback_data: 'noop' }]]),
-    }).catch(() => {});
-
     return sendPreview(item.id, chatId);
   }
 
@@ -437,7 +488,6 @@ async function handleCallback(query) {
     return sendItem(id, chatId);
   }
 
-  // Backward compatibility for old preview buttons.
   if (action === 'skip') {
     await updateQueueItem(id, { status: 'SKIPPED' });
     await setSetting('admin_state', null);
@@ -473,9 +523,8 @@ async function sendItem(id, chatId) {
       from_chat_id: item.source_chat_id,
       message_id: item.source_message_id,
       parse_mode: 'HTML',
+      caption: item.final_caption_html || '',
     };
-    if (item.final_caption_html) payload.caption = item.final_caption_html;
-    else payload.caption = '';
 
     const sent = await telegram('copyMessage', payload);
 
@@ -580,6 +629,6 @@ function identifyMedia(message) {
 async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
-    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nBila file masuk, setiap jenis format ada setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption. Apa kau ON/OFF dekat format tu aku ingat untuk file format sama lepas ni.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\n/version untuk check build yang tengah live.',
+    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nSetiap format file belajar setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption dan Remove Word. Remove Word simpan word/ayat wajib buang untuk format tu.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\n/version untuk check build yang tengah live.',
   });
 }
