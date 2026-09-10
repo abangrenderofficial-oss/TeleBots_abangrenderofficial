@@ -1,0 +1,27 @@
+name: Repair Telegram Webhook
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Vercel production and repair webhook
+        shell: bash
+        run: |
+          set -e
+          URL="https://tele-bots-abangrenderofficial.vercel.app/api/repair-webhook"
+          for i in {1..12}; do
+            echo "Attempt $i"
+            code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" -X POST "$URL" || true)
+            cat /tmp/body.txt || true
+            echo
+            if [ "$code" = "200" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Webhook repair endpoint did not become ready in time"
+          exit 1
