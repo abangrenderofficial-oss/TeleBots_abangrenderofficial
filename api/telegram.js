@@ -2,6 +2,7 @@ import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
 import { buildCaption, generateTitle } from '../lib/caption.js';
 import { agentAssistant } from '../lib/agent.js';
 import { testGeminiConnection } from '../lib/assistant.js';
+import { duplicateNotice, inspectIncomingDuplicate } from '../lib/duplicates.js';
 import { telegramTextToHtml } from '../lib/entities.js';
 import {
   addMemory,
@@ -167,14 +168,35 @@ async function keepFocus(itemId) {
 
 async function prepareMedia(message) {
   const media = identifyMedia(message);
-  let title;
+  const duplicateInput = {
+    adminChatId: message.chat.id,
+    sourceChatId: message.chat.id,
+    sourceMessageId: message.message_id,
+    fileUniqueId: media.fileUniqueId || '',
+    caption: message.caption || '',
+    fileName: media.fileName || '',
+  };
 
+  // First pass is cheap and catches Telegram's exact file identity before any AI work.
+  const beforeAi = await inspectIncomingDuplicate(duplicateInput);
+  if (beforeAi.kind === 'webhook_replay') return;
+  if (beforeAi.kind === 'exact_file') return handleExactDuplicate(message, beforeAi);
+
+  let title;
   try {
     title = await generateTitle({ caption: message.caption || '', fileName: media.fileName || '' });
   } catch (error) {
     console.error('Title generation failed:', error);
     title = fallbackMediaTitle(message.caption || '', media.fileName || '');
   }
+
+  // Second pass can also spot same serial/model or same normalized title.
+  const duplicateResult = await inspectIncomingDuplicate({
+    ...duplicateInput,
+    generatedTitle: title,
+  });
+  if (duplicateResult.kind === 'webhook_replay') return;
+  if (duplicateResult.kind === 'exact_file') return handleExactDuplicate(message, duplicateResult);
 
   const finalCaption = await buildCaption(title);
   const item = await createQueueItem({
@@ -192,7 +214,46 @@ async function prepareMedia(message) {
   });
 
   await keepFocus(item.id);
+
+  if (duplicateResult.kind === 'same_serial' || duplicateResult.kind === 'same_title') {
+    const notice = duplicateNotice(duplicateResult);
+    if (notice) {
+      await telegram('sendMessage', {
+        chat_id: message.chat.id,
+        text: notice,
+      });
+    }
+  }
+
   return sendPreview(item.id, message.chat.id);
+}
+
+async function handleExactDuplicate(message, duplicateResult) {
+  const oldItem = duplicateResult.match;
+  if (oldItem?.id) await keepFocus(oldItem.id).catch(() => {});
+
+  let deleted = false;
+  let deleteError = '';
+  try {
+    await telegram('deleteMessage', {
+      chat_id: message.chat.id,
+      message_id: message.message_id,
+    });
+    deleted = true;
+  } catch (error) {
+    deleteError = error?.message || 'unknown error';
+    console.error('Duplicate auto-delete failed:', deleteError);
+  }
+
+  const notice = duplicateNotice(duplicateResult);
+  const resultText = deleted
+    ? 'Copy baru yang kau tersalah hantar dah aku delete. Rekod/item asal aku kekalkan.'
+    : 'Aku detect duplicate exact, tapi Telegram tak benarkan aku delete mesej baru tu. Item baru tak dimasukkan ke queue.';
+
+  return telegram('sendMessage', {
+    chat_id: message.chat.id,
+    text: `${notice}\n\n${resultText}`.slice(0, 3900),
+  });
 }
 
 async function sendPreview(itemId, chatId) {
@@ -387,6 +448,6 @@ function identifyMedia(message) {
 async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
-    text: 'Abang Render Coordinator\n\nAku AI worker kau. Hantar file dan sembang terus macam biasa. Aku boleh cari item, edit title/caption, urus footer, belajar correction, semak duplicate, baca statistik, cari last send, ingat preference, skip, undo dan sediakan preview.\n\nTak perlu button AJAR/EDIT atau format arahan khas. Bila nak publish, aku tunjuk preview dengan SEND untuk confirmation.',
+    text: 'Abang Render Coordinator\n\nAku AI worker kau. Hantar file dan sembang terus macam biasa. Aku boleh cari item, edit title/caption, urus footer, belajar correction, semak duplicate, baca statistik, cari last send, ingat preference, skip, undo dan sediakan preview.\n\nDuplicate exact akan aku detect sebelum masuk queue dan copy baru akan aku delete automatik. Kalau cuma siri/title sama tapi file berbeza, aku warning saja dan tak delete.\n\nTak perlu button AJAR/EDIT atau format arahan khas. Bila nak publish, aku tunjuk preview dengan SEND untuk confirmation.',
   });
 }
