@@ -9,5 +9,8 @@ export default function handler(req, res) {
     setupSecretConfigured: Boolean(process.env.SETUP_SECRET),
     aiProvider: process.env.GEMINI_API_KEY ? 'gemini' : null,
     aiModel: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
+    agentModel: process.env.GEMINI_AGENT_MODEL || 'gemini-2.5-flash-lite',
+    agentArchitecture: 'dynamic-toolbox-v1',
+    agentToolCount: 51,
   });
 }
