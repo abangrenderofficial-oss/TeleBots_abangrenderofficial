@@ -1,12 +1,13 @@
 import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
 import { buildCaption, generateTitle, interpretTitleTeaching } from '../lib/caption.js';
-import { chatAssistant } from '../lib/assistant.js';
+import { chatAssistant, testGeminiConnection } from '../lib/assistant.js';
 import { telegramTextToHtml } from '../lib/entities.js';
 import {
   addMemory,
   clearChatHistory,
   createQueueItem,
   deleteMemory,
+  getLatestQueueItem,
   getQueueItem,
   getSetting,
   listMemories,
@@ -47,6 +48,12 @@ async function handleMessage(message) {
   if (!isAdminMessage(message)) return;
 
   if (text === '/start' || text === '/help') return sendHelp(chatId);
+
+  if (text === '/aitest') {
+    await telegram('sendMessage', { chat_id: chatId, text: '🔌 Aku test sambungan Gemini sekarang...' });
+    const result = await testGeminiConnection();
+    return telegram('sendMessage', { chat_id: chatId, text: formatAiTestResult(result) });
+  }
 
   if (text === '/stats') {
     const s = await stats();
@@ -167,39 +174,7 @@ async function handleMessage(message) {
       await setSetting('admin_state', null);
       return telegram('sendMessage', { chat_id: chatId, text: 'Item tu dah tak jumpa. Cuba /pending.' });
     }
-
-    await telegram('sendMessage', {
-      chat_id: chatId,
-      text: '🧠 Okay, aku baca contoh/arahan kau dulu. Aku tak akan simpan terus sampai kau confirm.',
-    });
-
-    const interpreted = await interpretTitleTeaching({
-      originalCaption: item.original_caption || '',
-      fileName: item.file_name || '',
-      currentTitle: item.generated_title || '',
-      ownerInstruction: text,
-    });
-
-    const pending = {
-      item_id: item.id,
-      owner_input: text,
-      corrected_title: interpreted.correctedTitle,
-      rule_summary: interpreted.ruleSummary,
-    };
-    await setSetting(pendingTeachingKey(chatId), pending);
-    await setSetting('admin_state', null);
-
-    return telegram('sendMessage', {
-      chat_id: chatId,
-      text: `Aku faham macam ni:\n\nTajuk yang sepatutnya:\n${interpreted.correctedTitle}\n\nApa yang aku belajar:\n${interpreted.ruleSummary}\n\nBetul macam ni?`,
-      reply_markup: inlineKeyboard([
-        [
-          { text: '✅ BETUL, SIMPAN', callback_data: `teachconfirm:${item.id}` },
-          { text: '✏️ AJAR SEMULA', callback_data: `teachretry:${item.id}` },
-        ],
-        [{ text: '❌ BATAL', callback_data: `teachcancel:${item.id}` }],
-      ]),
-    });
+    return processTeachingInstruction({ chatId, item, text, automatic: false });
   }
 
   if (hasMedia(message)) return prepareMedia(message);
@@ -221,6 +196,14 @@ async function handleMessage(message) {
       });
     }
 
+    // Owner can teach naturally without pressing TEACH THIS first.
+    if (looksLikeTeachingInstruction(text)) {
+      const latest = await getLatestQueueItem(chatId);
+      if (latest && isRecentQueueItem(latest, 45)) {
+        return processTeachingInstruction({ chatId, item: latest, text, automatic: true });
+      }
+    }
+
     const answer = await chatAssistant({ chatId, text });
     return telegram('sendMessage', {
       chat_id: chatId,
@@ -228,6 +211,43 @@ async function handleMessage(message) {
       disable_web_page_preview: true,
     });
   }
+}
+
+async function processTeachingInstruction({ chatId, item, text, automatic }) {
+  await telegram('sendMessage', {
+    chat_id: chatId,
+    text: automatic
+      ? '🧠 Aku faham ni sebagai arahan untuk belajar daripada item terbaru. Aku semak dulu dan tak simpan sampai kau confirm.'
+      : '🧠 Okay, aku baca contoh/arahan kau dulu. Aku tak akan simpan terus sampai kau confirm.',
+  });
+
+  const interpreted = await interpretTitleTeaching({
+    originalCaption: item.original_caption || '',
+    fileName: item.file_name || '',
+    currentTitle: item.generated_title || '',
+    ownerInstruction: text,
+  });
+
+  const pending = {
+    item_id: item.id,
+    owner_input: text,
+    corrected_title: interpreted.correctedTitle,
+    rule_summary: interpreted.ruleSummary,
+  };
+  await setSetting(pendingTeachingKey(chatId), pending);
+  await setSetting('admin_state', null);
+
+  return telegram('sendMessage', {
+    chat_id: chatId,
+    text: `Aku faham macam ni:\n\nTajuk yang sepatutnya:\n${interpreted.correctedTitle}\n\nApa yang aku belajar:\n${interpreted.ruleSummary}\n\nFooter yang kau dah set akan ditambah automatik di bawah title.\n\nBetul macam ni?`,
+    reply_markup: inlineKeyboard([
+      [
+        { text: '✅ BETUL, SIMPAN', callback_data: `teachconfirm:${item.id}` },
+        { text: '✏️ AJAR SEMULA', callback_data: `teachretry:${item.id}` },
+      ],
+      [{ text: '❌ BATAL', callback_data: `teachcancel:${item.id}` }],
+    ]),
+  });
 }
 
 async function prepareMedia(message) {
@@ -496,6 +516,31 @@ async function sendMemories(chatId) {
   });
 }
 
+function looksLikeTeachingInstruction(text) {
+  const value = String(text || '').toLowerCase();
+  if (value.startsWith('/')) return false;
+  const hasAction = /(buang|remove|delete|padam|ambil|keep|kekal|kekalkan|translate|terjemah|tambah|add|jangan|patut|sepatutnya|kalau|if|format)/i.test(value);
+  const hasSubject = /(tajuk|title|caption|hashtag|#|footer|serial|no\.?\s*siri|nombor\s*siri|model|perkataan|word|tutorial download|more collection)/i.test(value);
+  return hasAction && hasSubject;
+}
+
+function isRecentQueueItem(item, maxMinutes) {
+  const created = new Date(item?.created_at || 0).getTime();
+  if (!created) return false;
+  return Date.now() - created <= maxMinutes * 60 * 1000;
+}
+
+function formatAiTestResult(result) {
+  if (result?.ok) {
+    return `✅ Gemini connection OK\nModel: ${result.model}\nResponse time: ${result.ms}ms\nReply: ${result.answer}`;
+  }
+  if (result?.error) return `❌ Gemini test gagal\n${result.error}`;
+  const attempts = (result?.attempts || [])
+    .map((x) => `• ${x.model}: ${x.error} (${x.ms}ms)`)
+    .join('\n');
+  return `❌ Gemini test gagal untuk semua model.\n\n${attempts || 'Tak ada detail.'}`.slice(0, 3900);
+}
+
 function extractMemoryRequest(text) {
   const value = String(text || '').trim();
   const patterns = [
@@ -537,6 +582,6 @@ async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
     parse_mode: 'HTML',
-    text: `<b>Abang Render Coordinator</b>\n\nAku juga AI chat assistant. Kau boleh chat biasa dan aku akan guna recent chat + long-term memory + keadaan queue untuk jawab.\n\n/setcaption — save permanent footer with clickable links\n/setrules — save title extraction & translation rules\n/stats — file totals (photos excluded)\n/pending — show unsent items\n/remember &lt;text&gt; — save long-term memory\n/memories — view saved memories\n/forget &lt;ID&gt; — delete a memory\n/clearchat — clear AI chat history only\n/whoami — show your Telegram user ID\n/help — show this menu`,
+    text: `<b>Abang Render Coordinator</b>\n\nAku juga AI chat assistant. Kau boleh chat biasa dan aku akan guna recent chat + long-term memory + keadaan queue untuk jawab. Kau juga boleh ajar rule title terus dengan bahasa biasa selepas hantar item — tak wajib tekan TEACH THIS.\n\n/setcaption — save permanent footer with clickable links\n/setrules — save title extraction & translation rules\n/stats — file totals (photos excluded)\n/pending — show unsent items\n/remember &lt;text&gt; — save long-term memory\n/memories — view saved memories\n/forget &lt;ID&gt; — delete a memory\n/clearchat — clear AI chat history only\n/aitest — test Gemini connection\n/whoami — show your Telegram user ID\n/help — show this menu`,
   });
 }
