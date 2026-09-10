@@ -8,6 +8,6 @@ export default function handler(req, res) {
     aiConfigured: Boolean(process.env.GEMINI_API_KEY),
     setupSecretConfigured: Boolean(process.env.SETUP_SECRET),
     aiProvider: process.env.GEMINI_API_KEY ? 'gemini' : null,
-    aiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+    aiModel: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
   });
 }
