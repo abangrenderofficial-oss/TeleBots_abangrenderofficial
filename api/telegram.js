@@ -1,10 +1,15 @@
 import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
 import { buildCaption, generateTitle } from '../lib/caption.js';
+import { chatAssistant } from '../lib/assistant.js';
 import { telegramTextToHtml } from '../lib/entities.js';
 import {
+  addMemory,
+  clearChatHistory,
   createQueueItem,
+  deleteMemory,
   getQueueItem,
   getSetting,
+  listMemories,
   listPending,
   saveExample,
   setSetting,
@@ -46,6 +51,54 @@ async function handleMessage(message) {
 
   if (text === '/pending') {
     return sendPending(chatId);
+  }
+
+  if (text === '/memories') {
+    return sendMemories(chatId);
+  }
+
+  if (text === '/remember') {
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: 'Guna macam ni:\n/remember Lepas ni title mesti dalam English.\n\nAtau cakap je “ingat lepas ni…” dan aku akan minta confirmation sebelum simpan.',
+    });
+  }
+
+  if (text?.startsWith('/remember ')) {
+    const memory = text.slice('/remember '.length).trim();
+    if (!memory) return;
+    const saved = await addMemory(chatId, memory);
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: `🧠 Memory saved #${saved.id}\n${saved.content}`,
+    });
+  }
+
+  if (text === '/forget') {
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: 'Guna /memories untuk tengok nombor memory, kemudian /forget ID. Contoh: /forget 3',
+    });
+  }
+
+  if (text?.startsWith('/forget ')) {
+    const id = Number(text.slice('/forget '.length).trim());
+    if (!Number.isInteger(id) || id <= 0) {
+      return telegram('sendMessage', { chat_id: chatId, text: 'Memory ID tak valid. Contoh: /forget 3' });
+    }
+    const deleted = await deleteMemory(chatId, id);
+    if (!deleted?.length) {
+      return telegram('sendMessage', { chat_id: chatId, text: `Memory #${id} tak jumpa.` });
+    }
+    return telegram('sendMessage', { chat_id: chatId, text: `🗑 Memory #${id} dah dipadam.` });
+  }
+
+  if (text === '/clearchat') {
+    await clearChatHistory(chatId);
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: '🧹 AI chat history dah dikosongkan. Long-term memory masih kekal. Guna /memories untuk tengok memory kekal.',
+    });
   }
 
   if (text === '/setcaption') {
@@ -126,9 +179,27 @@ async function handleMessage(message) {
   if (hasMedia(message)) return prepareMedia(message);
 
   if (text) {
+    const memoryCandidate = extractMemoryRequest(text);
+    if (memoryCandidate) {
+      const key = pendingMemoryKey(chatId);
+      await setSetting(key, { content: memoryCandidate });
+      return telegram('sendMessage', {
+        chat_id: chatId,
+        text: `Kau nak aku simpan ini sebagai long-term memory?\n\n“${memoryCandidate}”`,
+        reply_markup: inlineKeyboard([
+          [
+            { text: '✅ SIMPAN MEMORY', callback_data: 'memoryconfirm' },
+            { text: '❌ BATAL', callback_data: 'memorycancel' },
+          ],
+        ]),
+      });
+    }
+
+    const answer = await chatAssistant({ chatId, text });
     return telegram('sendMessage', {
       chat_id: chatId,
-      text: 'I am ready. Send me a file/photo with or without caption, or use /help.',
+      text: answer,
+      disable_web_page_preview: true,
     });
   }
 }
@@ -193,8 +264,35 @@ async function handleCallback(query) {
   const data = query.data || '';
   await telegram('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
 
+  if (data === 'memoryconfirm') {
+    const key = pendingMemoryKey(chatId);
+    const pending = await getSetting(key);
+    if (!pending?.content) {
+      return telegram('sendMessage', { chat_id: chatId, text: 'Tak ada pending memory untuk disimpan.' });
+    }
+    const saved = await addMemory(chatId, pending.content);
+    await setSetting(key, null);
+    await telegram('editMessageReplyMarkup', {
+      chat_id: chatId,
+      message_id: message.message_id,
+      reply_markup: inlineKeyboard([[{ text: `🧠 SAVED #${saved.id}`, callback_data: 'noop' }]]),
+    }).catch(() => {});
+    return telegram('sendMessage', { chat_id: chatId, text: `✅ Aku akan ingat. Memory #${saved.id} disimpan.` });
+  }
+
+  if (data === 'memorycancel') {
+    await setSetting(pendingMemoryKey(chatId), null);
+    await telegram('editMessageReplyMarkup', {
+      chat_id: chatId,
+      message_id: message.message_id,
+      reply_markup: inlineKeyboard([[{ text: '❌ MEMORY NOT SAVED', callback_data: 'noop' }]]),
+    }).catch(() => {});
+    return;
+  }
+
   if (data === 'pending') return sendPending(chatId);
   if (data === 'sendall') return sendAll(chatId);
+  if (data === 'noop') return;
 
   const [action, id] = data.split(':');
   if (!id) return;
@@ -280,6 +378,39 @@ async function sendPending(chatId) {
   });
 }
 
+async function sendMemories(chatId) {
+  const memories = await listMemories(chatId, 30);
+  if (!memories?.length) {
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: '🧠 Belum ada long-term memory. Guna /remember <apa yang kau nak aku ingat> atau cakap “ingat lepas ni…”.',
+    });
+  }
+
+  const body = memories.map((m) => `#${m.id} — ${m.content}`).join('\n\n').slice(0, 3800);
+  return telegram('sendMessage', {
+    chat_id: chatId,
+    text: `🧠 LONG-TERM MEMORY\n\n${body}\n\nPadam: /forget ID`,
+  });
+}
+
+function extractMemoryRequest(text) {
+  const value = String(text || '').trim();
+  const patterns = [
+    /^(?:ingat|remember)(?:\s+(?:yang|bahawa|that))?\s*[:,-]?\s+(.+)$/is,
+    /^(?:simpan|save)\s+(?:ini\s+)?(?:dalam\s+)?(?:memory|memori|ingatan)\s*[:,-]?\s*(.+)$/is,
+  ];
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+    if (match?.[1]?.trim()) return match[1].trim().slice(0, 1500);
+  }
+  return null;
+}
+
+function pendingMemoryKey(chatId) {
+  return `pending_ai_memory:${chatId}`;
+}
+
 function hasMedia(message) {
   return Boolean(message.document || message.photo || message.video || message.animation || message.audio);
 }
@@ -300,6 +431,6 @@ async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
     parse_mode: 'HTML',
-    text: `<b>Abang Render Coordinator</b>\n\nSend a file/photo and I will prepare a caption preview.\n\n/setcaption — teach/save the permanent footer with clickable links\n/setrules — teach title extraction & translation rules\n/stats — file totals (photos excluded)\n/pending — show unsent items\n/help — show this menu`,
+    text: `<b>Abang Render Coordinator</b>\n\nAku sekarang juga AI chat assistant. Kau boleh chat biasa dan aku akan guna recent chat + long-term memory + keadaan queue untuk jawab.\n\n/setcaption — save permanent footer with clickable links\n/setrules — save title extraction & translation rules\n/stats — file totals (photos excluded)\n/pending — show unsent items\n/remember &lt;text&gt; — save long-term memory\n/memories — view saved memories\n/forget &lt;ID&gt; — delete a memory\n/clearchat — clear AI chat history only\n/help — show this menu`,
   });
 }
