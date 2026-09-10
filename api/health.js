@@ -2,6 +2,7 @@ export default function handler(req, res) {
   res.status(200).json({
     ok: true,
     service: 'telebots-abangrenderofficial',
+    build: 'format-learning-v1-kl-chat',
     telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
     adminConfigured: Boolean(process.env.ADMIN_TELEGRAM_ID),
     supabaseConfigured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
@@ -12,5 +13,7 @@ export default function handler(req, res) {
     agentModel: process.env.GEMINI_AGENT_MODEL || 'gemini-2.5-flash-lite',
     agentArchitecture: 'dynamic-toolbox-v1',
     agentToolCount: 51,
+    formatLearning: 'per-format-profile-v1',
+    aiReplyStyle: 'kuala-lumpur-pasar-chat-bubbles',
   });
 }
