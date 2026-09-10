@@ -19,22 +19,32 @@ import {
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(200).json({ ok: true });
-  res.status(200).json({ ok: true });
 
   try {
     const update = req.body || {};
     if (update.message) await handleMessage(update.message);
     if (update.callback_query) await handleCallback(update.callback_query);
+    return res.status(200).json({ ok: true });
   } catch (error) {
-    console.error(error);
+    console.error('Telegram webhook error:', error);
+    return res.status(200).json({ ok: true, handled: false });
   }
 }
 
 async function handleMessage(message) {
-  if (!isAdminMessage(message) || message.chat?.type !== 'private') return;
+  if (message.chat?.type !== 'private') return;
 
   const chatId = message.chat.id;
   const text = message.text?.trim();
+
+  if (text === '/whoami') {
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: `Telegram User ID: ${message.from?.id ?? 'unknown'}`,
+    });
+  }
+
+  if (!isAdminMessage(message)) return;
 
   if (text === '/start' || text === '/help') {
     return sendHelp(chatId);
@@ -431,6 +441,6 @@ async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
     parse_mode: 'HTML',
-    text: `<b>Abang Render Coordinator</b>\n\nAku sekarang juga AI chat assistant. Kau boleh chat biasa dan aku akan guna recent chat + long-term memory + keadaan queue untuk jawab.\n\n/setcaption — save permanent footer with clickable links\n/setrules — save title extraction & translation rules\n/stats — file totals (photos excluded)\n/pending — show unsent items\n/remember &lt;text&gt; — save long-term memory\n/memories — view saved memories\n/forget &lt;ID&gt; — delete a memory\n/clearchat — clear AI chat history only\n/help — show this menu`,
+    text: `<b>Abang Render Coordinator</b>\n\nAku sekarang juga AI chat assistant. Kau boleh chat biasa dan aku akan guna recent chat + long-term memory + keadaan queue untuk jawab.\n\n/setcaption — save permanent footer with clickable links\n/setrules — save title extraction & translation rules\n/stats — file totals (photos excluded)\n/pending — show unsent items\n/remember &lt;text&gt; — save long-term memory\n/memories — view saved memories\n/forget &lt;ID&gt; — delete a memory\n/clearchat — clear AI chat history only\n/whoami — show your Telegram user ID\n/help — show this menu`,
   });
 }
