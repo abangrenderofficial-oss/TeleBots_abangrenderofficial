@@ -2,7 +2,7 @@ import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
 import { buildCaption, generateTitle } from '../lib/caption.js';
 import { agentAssistant } from '../lib/agent.js';
 import { testGeminiConnection } from '../lib/assistant.js';
-import { telegramTextToHtml, telegramSubstringToHtml } from '../lib/entities.js';
+import { telegramTextToHtml } from '../lib/entities.js';
 import {
   addMemory,
   clearChatHistory,
@@ -13,7 +13,6 @@ import {
   getSetting,
   listMemories,
   listPending,
-  saveExample,
   setSetting,
   stats,
   updateQueueItem,
@@ -50,7 +49,7 @@ async function handleMessage(message) {
 
   if (text === '/start' || text === '/help') return sendHelp(chatId);
 
-  // Optional debug/shortcut commands. Normal use is conversation-first.
+  // Debug/backup shortcuts remain available, but daily use is AI conversation.
   if (text === '/aitest') {
     await telegram('sendMessage', { chat_id: chatId, text: 'Aku test sambungan Gemini sekarang...' });
     const result = await testGeminiConnection();
@@ -87,7 +86,8 @@ async function handleMessage(message) {
     });
   }
 
-  // Still kept as a backup for exact rich-text footer setup.
+  // Exact rich-text footer setup remains as a backup because Telegram entities
+  // carry hidden-link formatting that ordinary plain text cannot reconstruct.
   if (text === '/setcaption') {
     await setSetting('admin_state', { mode: 'SET_CAPTION' });
     return telegram('sendMessage', {
@@ -102,6 +102,7 @@ async function handleMessage(message) {
     const html = telegramTextToHtml(message.text, message.entities || []);
     await setSetting('caption_footer_html', html);
     const item = state?.item_id ? await getQueueItem(state.item_id) : await getLatestQueueItem(chatId);
+
     if (item) {
       const finalCaption = await buildCaption(item.generated_title || 'Untitled');
       await updateQueueItem(item.id, { final_caption_html: finalCaption, caption_replaced: true });
@@ -109,6 +110,7 @@ async function handleMessage(message) {
       await telegram('sendMessage', { chat_id: chatId, text: 'Okay, footer dah disimpan dan aku apply pada item sekarang.' });
       return sendPreview(item.id, chatId);
     }
+
     await setSetting('admin_state', null);
     return telegram('sendMessage', { chat_id: chatId, text: 'Okay, footer dah disimpan.' });
   }
@@ -123,142 +125,44 @@ async function handleAgentText(chatId, message, state) {
 
   telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
-  const plan = await agentAssistant({ chatId, text, focusedItemId });
-  const item = focusedItemId ? await getQueueItem(focusedItemId) : await getLatestQueueItem(chatId);
-
-  if (plan.action === 'show_stats') {
-    if (item) await keepFocus(item.id);
-    return sendStats(chatId, plan.reply);
-  }
-
-  if (plan.action === 'show_pending') {
-    if (plan.reply) await telegram('sendMessage', { chat_id: chatId, text: plan.reply });
-    if (item) await keepFocus(item.id);
-    return sendPending(chatId);
-  }
-
-  if (plan.action === 'remember') {
-    if (!plan.memory) {
-      if (item) await keepFocus(item.id);
-      return telegram('sendMessage', { chat_id: chatId, text: plan.reply || 'Apa yang kau nak aku ingat?' });
-    }
-    const saved = await addMemory(chatId, plan.memory);
-    if (item) await keepFocus(item.id);
-    return telegram('sendMessage', {
-      chat_id: chatId,
-      text: plan.reply || `Okay, aku ingat. Memory #${saved.id} disimpan.`,
-    });
-  }
-
-  if (plan.action === 'set_footer') {
-    const footerText = String(plan.footerText || extractFooterCandidate(text)).trim();
-    if (!footerText) {
-      if (item) await keepFocus(item.id);
-      return telegram('sendMessage', {
-        chat_id: chatId,
-        text: plan.reply || 'Faham kau nak ubah caption bawah tajuk. Paste bahagian footer yang kau nak, aku akan terus apply.',
-      });
-    }
-
-    // Preserve Telegram hidden links/bold/italic when the extracted footer is an exact substring of the message.
-    const footerHtml = telegramSubstringToHtml(message.text || '', message.entities || [], footerText);
-    await setSetting('caption_footer_html', footerHtml);
-
-    if (!item) {
-      await setSetting('admin_state', null);
-      return telegram('sendMessage', {
-        chat_id: chatId,
-        text: plan.reply || 'Okay, caption bawah tajuk tu dah aku simpan untuk item seterusnya.',
-      });
-    }
-
-    const finalCaption = await buildCaption(item.generated_title || 'Untitled');
-    await updateQueueItem(item.id, {
-      final_caption_html: finalCaption,
-      caption_replaced: true,
-      status: 'READY',
-    });
-    await keepFocus(item.id);
-
-    await telegram('sendMessage', {
-      chat_id: chatId,
-      text: plan.reply || 'Faham. Aku dah tambah caption tu di bawah tajuk dan simpan untuk file seterusnya juga.',
-    });
-    return sendPreview(item.id, chatId);
-  }
-
-  if (plan.action === 'skip_item') {
-    if (!item) return telegram('sendMessage', { chat_id: chatId, text: 'Tak ada item aktif untuk aku skip.' });
-    await updateQueueItem(item.id, { status: 'SKIPPED' });
-    await setSetting('admin_state', null);
-    return telegram('sendMessage', { chat_id: chatId, text: plan.reply || 'Okay, item ni aku skip.' });
-  }
-
-  if (plan.action === 'preview_item') {
-    if (!item) {
-      return telegram('sendMessage', { chat_id: chatId, text: 'Tak ada item untuk preview sekarang. Hantar file, gambar atau video dulu.' });
-    }
-    await keepFocus(item.id);
-    if (plan.reply) await telegram('sendMessage', { chat_id: chatId, text: plan.reply });
-    return sendPreview(item.id, chatId);
-  }
-
-  if (plan.action === 'revise_item') {
-    if (!item) {
-      return telegram('sendMessage', { chat_id: chatId, text: 'Tak ada item aktif untuk aku ubah. Hantar file, gambar atau video dulu.' });
-    }
-
-    const newTitle = String(plan.title || '').trim();
-    if (!newTitle) {
-      await keepFocus(item.id);
-      return telegram('sendMessage', {
-        chat_id: chatId,
-        text: plan.reply || 'Aku faham kau nak ubah item ni, tapi aku belum cukup jelas. Cakap je hasil yang kau nak.',
-      });
-    }
-
-    const finalCaption = await buildCaption(newTitle);
-    await updateQueueItem(item.id, {
-      generated_title: newTitle,
-      final_caption_html: finalCaption,
-      status: 'READY',
-      caption_replaced: true,
-    });
-
-    if (plan.learnRule) {
-      await saveExample(item.original_caption || item.file_name || '', newTitle);
-      await saveLearnedPreference(plan.learnRule);
-    }
-
-    await keepFocus(item.id);
-    await telegram('sendMessage', {
-      chat_id: chatId,
-      text: plan.reply || 'Okay, aku dah ubah ikut arahan kau. Preview baru ada di bawah.',
-    });
-    return sendPreview(item.id, chatId);
-  }
-
-  // Pure conversation stays alive and keeps the latest item in context.
-  if (item) await keepFocus(item.id);
-  return telegram('sendMessage', {
-    chat_id: chatId,
-    text: plan.reply || 'Ya, aku dengar. Cakap je macam biasa.',
-    disable_web_page_preview: true,
+  const result = await agentAssistant({
+    chatId,
+    text,
+    focusedItemId,
+    ownerText: message.text || text,
+    ownerEntities: message.entities || [],
   });
+
+  if (result.focusedItemId) await keepFocus(result.focusedItemId);
+
+  if (result.reply) {
+    await telegram('sendMessage', {
+      chat_id: chatId,
+      text: result.reply,
+      disable_web_page_preview: true,
+    });
+  }
+
+  for (const effect of result.effects || []) {
+    if (effect.type === 'preview_item' && effect.item_id) {
+      await keepFocus(effect.item_id);
+      await sendPreview(effect.item_id, chatId);
+    } else if (effect.type === 'confirm_send_all') {
+      await telegram('sendMessage', {
+        chat_id: chatId,
+        text: effect.count
+          ? `Ada ${effect.count} item yang ready untuk dihantar. Confirm kalau nak SEND ALL.`
+          : 'Tak ada item yang ready untuk dihantar.',
+        reply_markup: effect.count
+          ? inlineKeyboard([[{ text: `🚀 SEND ALL (${effect.count})`, callback_data: 'sendall' }]])
+          : undefined,
+      });
+    }
+  }
 }
 
 async function keepFocus(itemId) {
   return setSetting('admin_state', { mode: 'FOCUS_ITEM', item_id: itemId });
-}
-
-async function saveLearnedPreference(rule) {
-  const normalized = String(rule || '').trim();
-  if (!normalized) return;
-
-  const current = await getSetting('learned_title_rules');
-  const rules = Array.isArray(current) ? current : [];
-  if (rules.some((r) => String(r).toLowerCase() === normalized.toLowerCase())) return;
-  await setSetting('learned_title_rules', [...rules, normalized].slice(-40));
 }
 
 async function prepareMedia(message) {
@@ -330,7 +234,7 @@ async function handleCallback(query) {
     return sendItem(id, chatId);
   }
 
-  // Backward compatibility for old buttons already visible in old messages.
+  // Backward compatibility for old preview buttons already visible in chat.
   if (action === 'skip') {
     await updateQueueItem(id, { status: 'SKIPPED' });
     await setSetting('admin_state', null);
@@ -411,7 +315,7 @@ async function sendAll(chatId) {
 
 async function sendStats(chatId, intro = '') {
   const s = await stats();
-  const body = `Total file: ${s.total}\nSent: ${s.sent}\nPending: ${s.pending}\nFailed: ${s.failed}\nCaption replaced: ${s.caption_replaced}\n\nPhoto/image tak dikira dalam total file utama.`;
+  const body = `Total file: ${s.total}\nSent: ${s.sent}\nPending: ${s.pending}\nFailed: ${s.failed}\nSkipped: ${s.skipped || 0}\nCaption replaced: ${s.caption_replaced}\n\nPhoto/image tak dikira dalam total file utama.`;
   return telegram('sendMessage', {
     chat_id: chatId,
     text: `${intro ? `${intro}\n\n` : ''}${body}`,
@@ -451,23 +355,6 @@ function formatAiTestResult(result) {
   return `Gemini test gagal untuk semua model.\n\n${attempts || 'Tak ada detail.'}`.slice(0, 3900);
 }
 
-function extractFooterCandidate(text) {
-  const value = String(text || '').trim();
-  const markers = ['Tutorial Download:', 'More collection here'];
-  let first = -1;
-  for (const marker of markers) {
-    const i = value.toLowerCase().indexOf(marker.toLowerCase());
-    if (i >= 0 && (first < 0 || i < first)) first = i;
-  }
-  if (first >= 0) return value.slice(first).trim();
-
-  const parts = value.split(/\n\s*\n/);
-  if (parts.length > 1 && /(caption|footer|bawah tajuk|bawah title|macam bawah)/i.test(parts[0])) {
-    return parts.slice(1).join('\n\n').trim();
-  }
-  return '';
-}
-
 function fallbackMediaTitle(caption, fileName) {
   const lines = String(caption || '')
     .split(/\r?\n/)
@@ -500,6 +387,6 @@ function identifyMedia(message) {
 async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
-    text: 'Abang Render Coordinator\n\nAku AI assistant kau. Hantar file dan sembang terus macam biasa. Kalau nak ubah title, tambah caption bawah tajuk, tanya jumlah file, semak pending, suruh skip, atau minta preview — cakap je.\n\nTak perlu button AJAR/EDIT atau format arahan khas. Bila hasil ready, aku tunjuk preview dengan satu button SEND.',
+    text: 'Abang Render Coordinator\n\nAku AI worker kau. Hantar file dan sembang terus macam biasa. Aku boleh cari item, edit title/caption, urus footer, belajar correction, semak duplicate, baca statistik, cari last send, ingat preference, skip, undo dan sediakan preview.\n\nTak perlu button AJAR/EDIT atau format arahan khas. Bila nak publish, aku tunjuk preview dengan SEND untuk confirmation.',
   });
 }
