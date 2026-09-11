@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/telegram",
+      "destination": "/api/telegram-smart"
+    }
+  ]
+}
