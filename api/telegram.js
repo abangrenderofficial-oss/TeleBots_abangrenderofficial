@@ -37,7 +37,7 @@ import {
   updateQueueItem,
 } from '../lib/store.js';
 
-const BUILD_VERSION = 'format-learning-v2-remove-word-debug-send-v1';
+const BUILD_VERSION = 'format-learning-v2-group-auto-destination';
 const CALLBACK_DEBUG_KEY = 'telegram_callback_debug';
 
 async function debugCallback(stage, details = {}) {
@@ -87,7 +87,7 @@ export default async function handler(req, res) {
 }
 
 async function handleMessage(message) {
-  if (message.chat?.type !== 'private') return;
+  if (message.chat?.type !== 'private') return handleGroupMessage(message);
 
   const chatId = message.chat.id;
   const text = message.text?.trim();
@@ -207,6 +207,44 @@ async function handleMessage(message) {
 
   if (hasMedia(message)) return prepareMedia(message);
   if (text) return handleAgentText(chatId, message, state);
+}
+
+async function handleGroupMessage(message) {
+  const chat = message.chat;
+  if (!['group', 'supergroup'].includes(chat?.type)) return;
+  if (!isAdminMessage(message)) return;
+
+  const text = String(message.text || '').trim();
+  const connectCommand = /^\/connect(?:@\w+)?(?:\s|$)/i.test(text);
+  const botAdded = Array.isArray(message.new_chat_members)
+    && message.new_chat_members.some((member) => member?.is_bot);
+
+  if (!connectCommand && !botAdded) return;
+
+  const destination = String(chat.id);
+  await setSetting('destination_chat_id', destination);
+  await setSetting('destination_chat_info', {
+    id: destination,
+    title: chat.title || null,
+    type: chat.type || null,
+    connected_at: new Date().toISOString(),
+    connected_by: message.from?.id || null,
+    method: connectCommand ? 'connect_command' : 'bot_added',
+  });
+
+  await debugCallback('destination_auto_connected', {
+    destination,
+    title: chat.title || null,
+    type: chat.type || null,
+    method: connectCommand ? 'connect_command' : 'bot_added',
+  });
+
+  if (connectCommand) {
+    return telegram('sendMessage', {
+      chat_id: chat.id,
+      text: 'Connected. Group ni dah jadi destination SEND.',
+    });
+  }
 }
 
 async function handleAgentText(chatId, message, state) {
@@ -606,7 +644,7 @@ async function sendItem(id, chatId) {
   if (!destination) {
     await debugCallback('send_blocked_no_destination', { item_id: id, chat_id: chatId });
     await keepFocus(id);
-    return telegram('sendMessage', { chat_id: chatId, text: 'Destination belum set lagi.' });
+    return telegram('sendMessage', { chat_id: chatId, text: 'Destination belum set lagi. Dalam group target, hantar /connect sekali.' });
   }
 
   try {
@@ -746,6 +784,6 @@ function identifyMedia(message) {
 async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
-    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nSetiap format file belajar setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption dan Remove Word. Remove Word simpan word/ayat wajib buang untuk format tu.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\n/version untuk check build yang tengah live.',
+    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nSetiap format file belajar setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption dan Remove Word. Remove Word simpan word/ayat wajib buang untuk format tu.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\nGroup destination: invite bot, kemudian /connect dalam group sekali.\n\n/version untuk check build yang tengah live.',
   });
 }
