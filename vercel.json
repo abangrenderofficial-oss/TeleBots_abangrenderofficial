@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/telegram",
-      "destination": "/api/telegram-entry"
+      "destination": "/api/telegram-fast-recap"
     }
   ]
 }
