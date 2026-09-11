@@ -38,7 +38,7 @@ import {
   updateQueueItem,
 } from '../lib/store.js';
 
-const BUILD_VERSION = 'format-learning-v2-fast-first-preview';
+const BUILD_VERSION = 'format-learning-v2-fast-preview-buttons-total';
 const CALLBACK_DEBUG_KEY = 'telegram_callback_debug';
 const PREVIEW_BURST_SETTLE_MS = 180;
 
@@ -115,6 +115,7 @@ async function handleMessage(message) {
     return telegram('sendMessage', { chat_id: chatId, text: formatAiTestResult(result) });
   }
   if (text === '/stats') return sendStats(chatId);
+  if (text === '/total') return sendTotal(chatId);
   if (text === '/pending') return sendPending(chatId);
   if (text === '/memories') return sendMemories(chatId);
 
@@ -545,6 +546,7 @@ async function applyProcessedPreview(itemId, chatId, processed) {
       message_id: updated.preview_message_id,
       caption: updated.final_caption_html || '',
       parse_mode: 'HTML',
+      reply_markup: inlineKeyboard(compactPreviewRows(itemId)),
     }).catch((error) => {
       console.error('Fast preview refine edit failed:', error?.message || error);
     });
@@ -1001,6 +1003,14 @@ async function sendStats(chatId, intro = '') {
   });
 }
 
+async function sendTotal(chatId) {
+  const s = await stats();
+  return telegram('sendMessage', {
+    chat_id: chatId,
+    text: `TOTAL FILE: ${s.total}\n✅ SENT: ${s.sent}\n⏳ PENDING/READY: ${s.pending}\n❌ FAILED: ${s.failed}\n⏭ SKIPPED: ${s.skipped || 0}\n\nGambar/photo tak dikira sebagai file.`,
+  });
+}
+
 async function sendPending(chatId) {
   const items = await listPending(20);
   if (!items.length) return telegram('sendMessage', { chat_id: chatId, text: 'Tak ada item pending.' });
@@ -1053,6 +1063,6 @@ function identifyMedia(message) {
 async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
-    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nPreview default sekarang compact: ✏️, SEND dan SEND ALL. Tekan ✏️ untuk buka setting format, BACK untuk tutup semula.\n\nSetiap format file belajar setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption dan Remove Word. Remove Word simpan word/ayat wajib buang untuk format tu.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\nGroup destination: invite bot, kemudian /connect dalam group sekali.\n\n/version untuk check build yang tengah live.',
+    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nPreview default sekarang compact: ✏️, SEND dan SEND ALL. Tekan ✏️ untuk buka setting format, BACK untuk tutup semula.\n\nSetiap format file belajar setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption dan Remove Word. Remove Word simpan word/ayat wajib buang untuk format tu.\n\n/total untuk kira live semua file/document dalam bot. Gambar/photo tak masuk kiraan file.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\nGroup destination: invite bot, kemudian /connect dalam group sekali.\n\n/version untuk check build yang tengah live.',
   });
 }
