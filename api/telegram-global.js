@@ -7,6 +7,10 @@ import {
   resumeSending,
 } from '../lib/send-control.js';
 import { getSetting, setSetting } from '../lib/store.js';
+import {
+  SENDALL_WORKER_VERSION,
+  triggerSendAllWorker,
+} from '../lib/sendall-chain.js';
 
 const CAPTION_PAUSE_PREFIX = 'caption_paused:';
 const CAPTION_MEDIA_QUEUE_PREFIX = 'caption_media_queue:';
@@ -112,9 +116,24 @@ async function resumeAll(chatId, originalMessage, res) {
   }
 
   if (hasSendWork) {
-    await replayControlCommand(originalMessage, '/resumesend').catch((error) => {
-      console.error('Global resume send failed:', error?.message || error);
-    });
+    if (
+      sendBatch?.worker === SENDALL_WORKER_VERSION
+      && sendBatch?.id
+      && sendBatch?.worker_token
+    ) {
+      await resumeSending(chatId).catch(() => {});
+      await triggerSendAllWorker({
+        chatId,
+        batchId: sendBatch.id,
+        workerToken: sendBatch.worker_token,
+      }).catch((error) => {
+        console.error('Global resume chained SEND ALL failed:', error?.message || error);
+      });
+    } else {
+      await replayControlCommand(originalMessage, '/resumesend').catch((error) => {
+        console.error('Global resume send failed:', error?.message || error);
+      });
+    }
   } else if (sendPaused) {
     await resumeSending(chatId).catch(() => {});
   }
