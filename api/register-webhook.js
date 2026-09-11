@@ -1,4 +1,4 @@
-import { telegram } from '../lib/telegram.js';
+import { repairTelegramWebhook } from '../lib/telegram.js';
 
 function normalizeSecret(value) {
   if (typeof value !== 'string') return '';
@@ -65,17 +65,11 @@ export default async function handler(req, res) {
       });
     }
 
-    const host = req.headers['x-forwarded-host'] || req.headers.host;
-    const proto = req.headers['x-forwarded-proto'] || 'https';
-    const url = `${proto}://${host}/api/telegram`;
-
-    const result = await telegram('setWebhook', {
-      url,
-      allowed_updates: ['message', 'callback_query'],
-      drop_pending_updates: false,
-    });
-
-    return res.status(200).json({ ok: true, webhook: url, result });
+    // Always register the one stable production endpoint. Using the current
+    // request host here is dangerous because opening this page from a preview
+    // deployment would silently move Telegram's webhook to that old deployment.
+    const result = await repairTelegramWebhook();
+    return res.status(200).json(result);
   } catch (error) {
     return res.status(500).json({ ok: false, error: error.message });
   }
