@@ -38,8 +38,9 @@ import {
   updateQueueItem,
 } from '../lib/store.js';
 
-const BUILD_VERSION = 'format-learning-v2-ordered-preview-queue';
+const BUILD_VERSION = 'format-learning-v2-fast-first-preview';
 const CALLBACK_DEBUG_KEY = 'telegram_callback_debug';
+const PREVIEW_BURST_SETTLE_MS = 180;
 
 async function debugCallback(stage, details = {}) {
   const entry = {
@@ -385,16 +386,21 @@ async function prepareMedia(message) {
       mediaKind: media.kind,
     });
 
-    const baseProcessed = await processMediaWithProfile({
+    // Stage 1: build a local draft only. No Gemini call is allowed to block the
+    // first preview. This is intentionally good-enough and can be refined after
+    // Telegram has already shown the preview to the owner.
+    const draftBase = await processMediaWithProfile({
       caption: message.caption || '',
       fileName: media.fileName || '',
       profile: resolved.profile,
+      fast: true,
+      useAi: false,
     });
-    const processed = await applyFormatRemoveTerms(resolved.profile.id, baseProcessed);
+    const draft = await applyFormatRemoveTerms(resolved.profile.id, draftBase);
 
     const duplicateResult = await inspectIncomingDuplicate({
       ...duplicateInput,
-      generatedTitle: processed.title || '',
+      generatedTitle: draft.title || '',
       currentItemId: item.id,
     });
 
@@ -407,18 +413,25 @@ async function prepareMedia(message) {
     }
 
     await updateQueueItem(item.id, {
-      generated_title: processed.title || null,
-      final_caption_html: processed.finalCaptionHtml || null,
+      generated_title: draft.title || null,
+      final_caption_html: draft.finalCaptionHtml || null,
       status: 'READY',
       caption_replaced: true,
       error_message: null,
     });
 
-    await saveItemFormatContext(item.id, {
-      profile_id: resolved.profile.id,
-      signature: resolved.signature,
-    });
-    await keepFocus(item.id);
+    await Promise.all([
+      saveItemFormatContext(item.id, {
+        profile_id: resolved.profile.id,
+        signature: resolved.signature,
+      }),
+      keepFocus(item.id),
+    ]);
+
+    // Release the ordered preview as early as possible. The short settle window
+    // still protects the exact forward order when many Telegram updates arrive
+    // together, but removes the old 900ms minimum wait.
+    await queueOrderedPreviewFlush(message.chat.id);
 
     if (resolved.isNew) {
       await telegram('sendMessage', {
@@ -432,7 +445,18 @@ async function prepareMedia(message) {
       if (notice) await telegram('sendMessage', { chat_id: message.chat.id, text: notice });
     }
 
-    return queueOrderedPreviewFlush(message.chat.id);
+    // Stage 2: finish any DB-backed footer/local cleanup and, only when useful,
+    // let Gemini refine/translate. If the preview already exists it is edited in
+    // place; if it has not appeared yet, the refined caption simply becomes the
+    // caption used when the ordered flush reaches it.
+    await refineInitialPreview({
+      itemId: item.id,
+      chatId: message.chat.id,
+      caption: message.caption || '',
+      fileName: media.fileName || '',
+      resolved,
+      draft,
+    });
   } catch (error) {
     const errorText = String(error?.message || error).slice(0, 1000);
     await updateQueueItem(item.id, {
@@ -444,14 +468,99 @@ async function prepareMedia(message) {
   }
 }
 
+async function refineInitialPreview({ itemId, chatId, caption, fileName, resolved, draft }) {
+  let currentProcessed = draft;
+
+  // Complete local-only work first. This can fetch a global footer if the cold
+  // function did not have it cached, but still never calls Gemini.
+  const localBase = await processMediaWithProfile({
+    caption,
+    fileName,
+    profile: resolved.profile,
+    fast: false,
+    useAi: false,
+  });
+  const localProcessed = await applyFormatRemoveTerms(resolved.profile.id, localBase);
+  if (processedChanged(currentProcessed, localProcessed)) {
+    await applyProcessedPreview(itemId, chatId, localProcessed);
+    currentProcessed = localProcessed;
+  }
+
+  // Learned formats that do not translate stay fully local. New formats and
+  // Translate=ON may use Gemini, but only after the owner has had a chance to
+  // see the draft preview.
+  const shouldUseAi = Boolean(resolved.isNew || resolved.profile?.actions?.translate);
+  if (!shouldUseAi) return;
+
+  const latestProfile = await getFormatProfile(resolved.profile.id).catch(() => null);
+  if (!latestProfile) return;
+
+  // If the owner changed this format while refinement was running, never let an
+  // older background result overwrite the fresh button choice.
+  if (String(latestProfile.updated_at || '') !== String(resolved.profile.updated_at || '')) return;
+
+  const smartBase = await processMediaWithProfile({
+    caption,
+    fileName,
+    profile: latestProfile,
+    fast: false,
+    useAi: true,
+  });
+  const smartProcessed = await applyFormatRemoveTerms(latestProfile.id, smartBase);
+  if (processedChanged(currentProcessed, smartProcessed)) {
+    await applyProcessedPreview(itemId, chatId, smartProcessed);
+  }
+}
+
+function processedChanged(a, b) {
+  return String(a?.title || '') !== String(b?.title || '')
+    || String(a?.finalCaptionHtml || '') !== String(b?.finalCaptionHtml || '');
+}
+
+async function applyProcessedPreview(itemId, chatId, processed) {
+  const current = await getQueueItem(itemId);
+  if (!current) return null;
+  if (['SENT', 'SKIPPED'].includes(String(current.status || '').toUpperCase())) return current;
+
+  const nextTitle = processed?.title || null;
+  const nextCaption = processed?.finalCaptionHtml || null;
+  if (
+    String(current.generated_title || '') === String(nextTitle || '')
+    && String(current.final_caption_html || '') === String(nextCaption || '')
+  ) {
+    return current;
+  }
+
+  const updated = await updateQueueItem(itemId, {
+    generated_title: nextTitle,
+    final_caption_html: nextCaption,
+    caption_replaced: true,
+    status: current.status === 'FAILED' ? 'READY' : current.status,
+    error_message: null,
+  });
+
+  if (updated?.preview_message_id) {
+    await telegram('editMessageCaption', {
+      chat_id: chatId,
+      message_id: updated.preview_message_id,
+      caption: updated.final_caption_html || '',
+      parse_mode: 'HTML',
+    }).catch((error) => {
+      console.error('Fast preview refine edit failed:', error?.message || error);
+    });
+  }
+
+  return updated;
+}
+
 async function queueOrderedPreviewFlush(chatId) {
   const tokenKey = `preview_flush_token:${chatId}`;
   const token = `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
   await setSetting(tokenKey, { token, at: new Date().toISOString() });
 
-  // Give a burst of forwarded Telegram updates time to register their PENDING
-  // rows first. Then only the newest completion is allowed to flush previews.
-  await sleep(900);
+  // Short burst buffer: enough time for forwarded updates to register their
+  // PENDING/READY rows, without making every first preview wait almost a second.
+  await sleep(PREVIEW_BURST_SETTLE_MS);
   const latest = await getSetting(tokenKey);
   if (latest?.token !== token) return;
 
