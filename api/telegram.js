@@ -37,7 +37,27 @@ import {
   updateQueueItem,
 } from '../lib/store.js';
 
-const BUILD_VERSION = 'format-learning-v2-remove-word';
+const BUILD_VERSION = 'format-learning-v2-remove-word-debug-send-v1';
+const CALLBACK_DEBUG_KEY = 'telegram_callback_debug';
+
+async function debugCallback(stage, details = {}) {
+  const entry = {
+    at: new Date().toISOString(),
+    stage,
+    ...details,
+  };
+
+  try {
+    const current = await getSetting(CALLBACK_DEBUG_KEY);
+    const events = Array.isArray(current?.events) ? current.events : [];
+    await setSetting(CALLBACK_DEBUG_KEY, {
+      last: entry,
+      events: [...events, entry].slice(-30),
+    });
+  } catch (error) {
+    console.error('Callback debug write failed:', error?.message || error);
+  }
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(200).json({ ok: true });
@@ -45,10 +65,23 @@ export default async function handler(req, res) {
   try {
     const update = req.body || {};
     if (update.message) await handleMessage(update.message);
-    if (update.callback_query) await handleCallback(update.callback_query);
+    if (update.callback_query) {
+      const query = update.callback_query;
+      await debugCallback('webhook_callback_received', {
+        callback_query_id: query.id || null,
+        data: query.data || '',
+        from_id: query.from?.id || null,
+        chat_id: query.message?.chat?.id || null,
+        message_id: query.message?.message_id || null,
+      });
+      await handleCallback(query);
+    }
     return res.status(200).json({ ok: true, build: BUILD_VERSION });
   } catch (error) {
     console.error('Telegram webhook error:', error);
+    await debugCallback('webhook_handler_error', {
+      error: String(error?.message || error).slice(0, 800),
+    });
     return res.status(200).json({ ok: true, handled: false, build: BUILD_VERSION });
   }
 }
@@ -399,8 +432,6 @@ async function sendPreview(itemId, chatId) {
     { text: removeWordButtonLabel(removeTerms), callback_data: `fmt_removeword:${item.id}` },
   ]);
 
-  // Satu item cuma boleh ada satu preview aktif. Kalau preview lama ada,
-  // delete dulu sebelum keluarkan preview terbaru.
   if (item.preview_message_id) {
     await telegram('deleteMessage', {
       chat_id: chatId,
@@ -424,18 +455,53 @@ async function sendPreview(itemId, chatId) {
 
 async function handleCallback(query) {
   const message = query.message;
-  if (!message || !isAdminMessage({ from: query.from })) return;
+  await debugCallback('handle_callback_enter', {
+    callback_query_id: query.id || null,
+    data: query.data || '',
+    has_message: Boolean(message),
+    from_id: query.from?.id || null,
+    chat_id: message?.chat?.id || null,
+    message_id: message?.message_id || null,
+  });
+
+  if (!message) {
+    await debugCallback('handle_callback_rejected_no_message', { data: query.data || '' });
+    return;
+  }
+
+  if (!isAdminMessage({ from: query.from })) {
+    await debugCallback('handle_callback_rejected_not_admin', {
+      data: query.data || '',
+      from_id: query.from?.id || null,
+    });
+    return;
+  }
 
   const chatId = message.chat.id;
   const data = query.data || '';
-  await telegram('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
+  await telegram('answerCallbackQuery', { callback_query_id: query.id }).catch(async (error) => {
+    await debugCallback('answer_callback_failed', {
+      data,
+      error: String(error?.message || error).slice(0, 500),
+    });
+  });
 
   if (data === 'noop') return;
   if (data === 'pending') return sendPending(chatId);
   if (data === 'sendall') return sendAll(chatId);
 
   const [action, id] = data.split(':');
-  if (!id) return;
+  await debugCallback('callback_parsed', {
+    data,
+    action: action || null,
+    item_id: id || null,
+    chat_id: chatId,
+  });
+
+  if (!id) {
+    await debugCallback('callback_rejected_missing_item_id', { data, action: action || null });
+    return;
+  }
 
   if (action.startsWith('fmt_')) {
     const item = await getQueueItem(id);
@@ -458,8 +524,6 @@ async function handleCallback(query) {
       return;
     }
 
-    // Tambah Caption dan Ubah Caption dua-dua minta text daripada owner,
-    // kemudian hasilnya terus masuk dalam preview media, bukan bubble chat.
     if (action === 'fmt_footer' || action === 'fmt_editfooter') {
       const prompt = await telegram('sendMessage', {
         chat_id: chatId,
@@ -484,6 +548,11 @@ async function handleCallback(query) {
   }
 
   if (action === 'send') {
+    await debugCallback('send_branch_enter', {
+      item_id: id,
+      chat_id: chatId,
+      preview_message_id: message.message_id || null,
+    });
     await setSetting('admin_state', null);
     return sendItem(id, chatId);
   }
@@ -505,19 +574,49 @@ async function handleCallback(query) {
       text: 'Button lama tu ignore je. Cakap terus apa kau nak ubah, atau guna setting dekat preview baru.',
     });
   }
+
+  await debugCallback('callback_unhandled_action', { data, action, item_id: id });
 }
 
 async function sendItem(id, chatId) {
-  const item = await getQueueItem(id);
-  if (!item || item.status === 'SENT') return;
+  await debugCallback('send_item_start', { item_id: id, chat_id: chatId });
 
-  const destination = (await getSetting('destination_chat_id')) || process.env.DESTINATION_CHAT_ID;
+  const item = await getQueueItem(id);
+  if (!item) {
+    await debugCallback('send_item_missing', { item_id: id, chat_id: chatId });
+    return;
+  }
+  if (item.status === 'SENT') {
+    await debugCallback('send_item_already_sent', { item_id: id, chat_id: chatId });
+    return;
+  }
+
+  const dbDestination = await getSetting('destination_chat_id');
+  const envDestination = process.env.DESTINATION_CHAT_ID;
+  const destination = dbDestination || envDestination;
+
+  await debugCallback('send_destination_resolved', {
+    item_id: id,
+    item_status: item.status || null,
+    has_db_destination: Boolean(dbDestination),
+    has_env_destination: Boolean(envDestination),
+    destination: destination ? String(destination) : null,
+  });
+
   if (!destination) {
+    await debugCallback('send_blocked_no_destination', { item_id: id, chat_id: chatId });
     await keepFocus(id);
     return telegram('sendMessage', { chat_id: chatId, text: 'Destination belum set lagi.' });
   }
 
   try {
+    await debugCallback('send_copy_start', {
+      item_id: id,
+      destination: String(destination),
+      source_chat_id: item.source_chat_id || null,
+      source_message_id: item.source_message_id || null,
+    });
+
     const payload = {
       chat_id: destination,
       from_chat_id: item.source_chat_id,
@@ -528,6 +627,12 @@ async function sendItem(id, chatId) {
 
     const sent = await telegram('copyMessage', payload);
 
+    await debugCallback('send_copy_success', {
+      item_id: id,
+      destination: String(destination),
+      destination_message_id: sent?.message_id || null,
+    });
+
     await updateQueueItem(id, {
       status: 'SENT',
       destination_chat_id: String(destination),
@@ -537,14 +642,26 @@ async function sendItem(id, chatId) {
     });
 
     await setSetting('admin_state', null);
+    await debugCallback('send_complete', {
+      item_id: id,
+      destination: String(destination),
+      destination_message_id: sent?.message_id || null,
+    });
+
     return telegram('sendMessage', {
       chat_id: chatId,
       text: `SENT\n${item.file_name || item.generated_title || 'Item'}`,
     });
   } catch (error) {
-    await updateQueueItem(id, { status: 'FAILED', error_message: error.message });
+    const errorText = String(error?.message || error).slice(0, 1000);
+    await debugCallback('send_failed', {
+      item_id: id,
+      destination: String(destination),
+      error: errorText,
+    });
+    await updateQueueItem(id, { status: 'FAILED', error_message: errorText });
     await keepFocus(id);
-    return telegram('sendMessage', { chat_id: chatId, text: `FAILED\n${error.message}` });
+    return telegram('sendMessage', { chat_id: chatId, text: `FAILED\n${errorText}` });
   }
 }
 
