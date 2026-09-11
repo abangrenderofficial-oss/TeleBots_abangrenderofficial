@@ -37,7 +37,7 @@ import {
   updateQueueItem,
 } from '../lib/store.js';
 
-const BUILD_VERSION = 'format-learning-v2-group-auto-destination';
+const BUILD_VERSION = 'format-learning-v2-compact-preview-controls';
 const CALLBACK_DEBUG_KEY = 'telegram_callback_debug';
 
 async function debugCallback(stage, details = {}) {
@@ -170,7 +170,7 @@ async function handleMessage(message) {
     await reprocessItemWithProfile(item.id, profile);
     await keepFocus(item.id);
     await deleteHelperPrompt(chatId, state.prompt_message_id);
-    return sendPreview(item.id, chatId);
+    return showEditMenu(item.id, chatId);
   }
 
   if (state?.mode === 'EDIT_FORMAT_FOOTER' && text) {
@@ -186,7 +186,7 @@ async function handleMessage(message) {
     await reprocessItemWithProfile(item.id, updatedProfile);
     await keepFocus(item.id);
     await deleteHelperPrompt(chatId, state.prompt_message_id);
-    return sendPreview(item.id, chatId);
+    return showEditMenu(item.id, chatId);
   }
 
   if (state?.mode === 'SET_CAPTION' && text) {
@@ -459,16 +459,31 @@ async function reprocessItemWithProfile(itemId, profile) {
   });
 }
 
+function compactPreviewRows(itemId) {
+  return [[
+    { text: '✏️', callback_data: `edit:${itemId}` },
+    { text: '✅ SEND', callback_data: `send:${itemId}` },
+    { text: '🚀 SEND ALL', callback_data: 'sendall' },
+  ]];
+}
+
+async function expandedPreviewRows(item, profile) {
+  const removeTerms = await getFormatRemoveTerms(profile.id);
+  const rows = formatProfileKeyboardRows(profile, item.id);
+
+  // Edit mode only: hide the profile header and SEND row, then add Remove Word + Back.
+  if (rows.length) rows.shift();
+  if (rows.length) rows.pop();
+  rows.push([{ text: removeWordButtonLabel(removeTerms), callback_data: `fmt_removeword:${item.id}` }]);
+  rows.push([{ text: '⬅️ BACK', callback_data: `back:${item.id}` }]);
+  return rows;
+}
+
 async function sendPreview(itemId, chatId) {
   const item = await getQueueItem(itemId);
   if (!item) return;
 
-  const profile = await getProfileForItem(item);
-  const removeTerms = await getFormatRemoveTerms(profile.id);
-  const rows = formatProfileKeyboardRows(profile, item.id);
-  rows.splice(Math.max(0, rows.length - 1), 0, [
-    { text: removeWordButtonLabel(removeTerms), callback_data: `fmt_removeword:${item.id}` },
-  ]);
+  const rows = compactPreviewRows(item.id);
 
   if (item.preview_message_id) {
     await telegram('deleteMessage', {
@@ -489,6 +504,40 @@ async function sendPreview(itemId, chatId) {
 
   const copied = await telegram('copyMessage', payload);
   await updateQueueItem(item.id, { preview_message_id: copied.message_id });
+}
+
+async function showEditMenu(itemId, chatId, fallbackMessageId = null) {
+  const item = await getQueueItem(itemId);
+  if (!item) return;
+  const profile = await getProfileForItem(item);
+  if (!profile) return;
+
+  const rows = await expandedPreviewRows(item, profile);
+  const messageId = item.preview_message_id || fallbackMessageId;
+  if (!messageId) return;
+
+  await keepFocus(item.id);
+  return telegram('editMessageCaption', {
+    chat_id: chatId,
+    message_id: messageId,
+    caption: item.final_caption_html || '',
+    parse_mode: 'HTML',
+    reply_markup: inlineKeyboard(rows),
+  });
+}
+
+async function showCompactMenu(itemId, chatId, fallbackMessageId = null) {
+  const item = await getQueueItem(itemId);
+  if (!item) return;
+  const messageId = item.preview_message_id || fallbackMessageId;
+  if (!messageId) return;
+
+  await keepFocus(item.id);
+  return telegram('editMessageReplyMarkup', {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: inlineKeyboard(compactPreviewRows(item.id)),
+  });
 }
 
 async function handleCallback(query) {
@@ -541,6 +590,14 @@ async function handleCallback(query) {
     return;
   }
 
+  if (action === 'edit') {
+    return showEditMenu(id, chatId, message.message_id);
+  }
+
+  if (action === 'back') {
+    return showCompactMenu(id, chatId, message.message_id);
+  }
+
   if (action.startsWith('fmt_')) {
     const item = await getQueueItem(id);
     if (!item) return telegram('sendMessage', { chat_id: chatId, text: 'Item tu dah tak jumpa.' });
@@ -562,7 +619,7 @@ async function handleCallback(query) {
       return;
     }
 
-    if (action === 'fmt_footer' || action === 'fmt_editfooter') {
+    if (action === 'fmt_editfooter') {
       const prompt = await telegram('sendMessage', {
         chat_id: chatId,
         text: `Send caption yang kau nak letak bawah tajuk untuk ${profile.name}.`,
@@ -582,7 +639,7 @@ async function handleCallback(query) {
     const updatedProfile = await toggleFormatOption(profile.id, option);
     await reprocessItemWithProfile(item.id, updatedProfile);
     await keepFocus(item.id);
-    return sendPreview(item.id, chatId);
+    return showEditMenu(item.id, chatId, message.message_id);
   }
 
   if (action === 'send') {
@@ -605,7 +662,7 @@ async function handleCallback(query) {
     });
   }
 
-  if (action === 'edit' || action === 'teach') {
+  if (action === 'teach') {
     await keepFocus(id);
     return telegram('sendMessage', {
       chat_id: chatId,
@@ -784,6 +841,6 @@ function identifyMedia(message) {
 async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
-    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nSetiap format file belajar setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption dan Remove Word. Remove Word simpan word/ayat wajib buang untuk format tu.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\nGroup destination: invite bot, kemudian /connect dalam group sekali.\n\n/version untuk check build yang tengah live.',
+    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nPreview default sekarang compact: ✏️, SEND dan SEND ALL. Tekan ✏️ untuk buka setting format, BACK untuk tutup semula.\n\nSetiap format file belajar setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption dan Remove Word. Remove Word simpan word/ayat wajib buang untuk format tu.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\nGroup destination: invite bot, kemudian /connect dalam group sekali.\n\n/version untuk check build yang tengah live.',
   });
 }
