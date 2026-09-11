@@ -32,12 +32,13 @@ import {
   getSetting,
   listMemories,
   listPending,
+  listQueueItems,
   setSetting,
   stats,
   updateQueueItem,
 } from '../lib/store.js';
 
-const BUILD_VERSION = 'format-learning-v2-compact-preview-controls';
+const BUILD_VERSION = 'format-learning-v2-ordered-preview-queue';
 const CALLBACK_DEBUG_KEY = 'telegram_callback_debug';
 
 async function debugCallback(stage, details = {}) {
@@ -335,6 +336,10 @@ function splitIntoBubbles(text) {
   return out.slice(0, 5).map((x) => x.slice(0, 3900));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function keepFocus(itemId) {
   return setSetting('admin_state', { mode: 'FOCUS_ITEM', item_id: itemId });
 }
@@ -359,26 +364,6 @@ async function prepareMedia(message) {
   if (beforeAi.kind === 'webhook_replay') return;
   if (beforeAi.kind === 'exact_file') return handleExactDuplicate(message, beforeAi);
 
-  const resolved = await resolveFormatProfile({
-    caption: message.caption || '',
-    fileName: media.fileName || '',
-    mediaKind: media.kind,
-  });
-
-  const baseProcessed = await processMediaWithProfile({
-    caption: message.caption || '',
-    fileName: media.fileName || '',
-    profile: resolved.profile,
-  });
-  const processed = await applyFormatRemoveTerms(resolved.profile.id, baseProcessed);
-
-  const duplicateResult = await inspectIncomingDuplicate({
-    ...duplicateInput,
-    generatedTitle: processed.title || '',
-  });
-  if (duplicateResult.kind === 'webhook_replay') return;
-  if (duplicateResult.kind === 'exact_file') return handleExactDuplicate(message, duplicateResult);
-
   const item = await createQueueItem({
     admin_chat_id: message.chat.id,
     source_chat_id: message.chat.id,
@@ -387,31 +372,149 @@ async function prepareMedia(message) {
     file_name: media.fileName || null,
     file_unique_id: media.fileUniqueId || null,
     original_caption: message.caption || null,
-    generated_title: processed.title || null,
-    final_caption_html: processed.finalCaptionHtml || null,
-    status: 'READY',
-    caption_replaced: true,
+    generated_title: null,
+    final_caption_html: null,
+    status: 'PENDING',
+    caption_replaced: false,
   });
 
-  await saveItemFormatContext(item.id, {
-    profile_id: resolved.profile.id,
-    signature: resolved.signature,
-  });
-  await keepFocus(item.id);
-
-  if (resolved.isNew) {
-    await telegram('sendMessage', {
-      chat_id: message.chat.id,
-      text: `${resolved.profile.name} baru aku detect. Setting dekat preview ni khas untuk format ni. Kau ajar sekali, format sama lepas ni aku ingat.`,
+  try {
+    const resolved = await resolveFormatProfile({
+      caption: message.caption || '',
+      fileName: media.fileName || '',
+      mediaKind: media.kind,
     });
+
+    const baseProcessed = await processMediaWithProfile({
+      caption: message.caption || '',
+      fileName: media.fileName || '',
+      profile: resolved.profile,
+    });
+    const processed = await applyFormatRemoveTerms(resolved.profile.id, baseProcessed);
+
+    const duplicateResult = await inspectIncomingDuplicate({
+      ...duplicateInput,
+      generatedTitle: processed.title || '',
+      currentItemId: item.id,
+    });
+
+    if (duplicateResult.kind === 'exact_file') {
+      await updateQueueItem(item.id, {
+        status: 'SKIPPED',
+        error_message: 'Duplicate exact already SENT.',
+      });
+      return handleExactDuplicate(message, duplicateResult);
+    }
+
+    await updateQueueItem(item.id, {
+      generated_title: processed.title || null,
+      final_caption_html: processed.finalCaptionHtml || null,
+      status: 'READY',
+      caption_replaced: true,
+      error_message: null,
+    });
+
+    await saveItemFormatContext(item.id, {
+      profile_id: resolved.profile.id,
+      signature: resolved.signature,
+    });
+    await keepFocus(item.id);
+
+    if (resolved.isNew) {
+      await telegram('sendMessage', {
+        chat_id: message.chat.id,
+        text: `${resolved.profile.name} baru aku detect. Setting dekat preview ni khas untuk format ni. Kau ajar sekali, format sama lepas ni aku ingat.`,
+      });
+    }
+
+    if (['exact_file_unsent', 'same_serial', 'same_title'].includes(duplicateResult.kind)) {
+      const notice = duplicateNotice(duplicateResult);
+      if (notice) await telegram('sendMessage', { chat_id: message.chat.id, text: notice });
+    }
+
+    return queueOrderedPreviewFlush(message.chat.id);
+  } catch (error) {
+    const errorText = String(error?.message || error).slice(0, 1000);
+    await updateQueueItem(item.id, {
+      status: 'FAILED',
+      error_message: errorText,
+    }).catch(() => {});
+    await queueOrderedPreviewFlush(message.chat.id).catch(() => {});
+    throw error;
+  }
+}
+
+async function queueOrderedPreviewFlush(chatId) {
+  const tokenKey = `preview_flush_token:${chatId}`;
+  const token = `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  await setSetting(tokenKey, { token, at: new Date().toISOString() });
+
+  // Give a burst of forwarded Telegram updates time to register their PENDING
+  // rows first. Then only the newest completion is allowed to flush previews.
+  await sleep(900);
+  const latest = await getSetting(tokenKey);
+  if (latest?.token !== token) return;
+
+  return flushOrderedPreviews(chatId);
+}
+
+async function flushOrderedPreviews(chatId) {
+  const lockKey = `preview_flush_lock:${chatId}`;
+  const dirtyKey = `preview_flush_dirty:${chatId}`;
+  const now = Date.now();
+  const running = await getSetting(lockKey).catch(() => null);
+
+  if (running?.at) {
+    const age = now - Date.parse(running.at);
+    if (Number.isFinite(age) && age >= 0 && age < 30_000) {
+      await setSetting(dirtyKey, true).catch(() => {});
+      return;
+    }
   }
 
-  if (['exact_file_unsent', 'same_serial', 'same_title'].includes(duplicateResult.kind)) {
-    const notice = duplicateNotice(duplicateResult);
-    if (notice) await telegram('sendMessage', { chat_id: message.chat.id, text: notice });
-  }
+  const lockToken = `${now}_${Math.random().toString(36).slice(2, 9)}`;
+  await setSetting(lockKey, { token: lockToken, at: new Date().toISOString() });
+  const confirmed = await getSetting(lockKey).catch(() => null);
+  if (confirmed?.token !== lockToken) return;
 
-  return sendPreview(item.id, message.chat.id);
+  try {
+    const rows = await listQueueItems(chatId, 500);
+    const stalePendingBefore = Date.now() - (2 * 60 * 1000);
+    const recentBefore = Date.now() - (60 * 60 * 1000);
+
+    const waiting = (rows || [])
+      .filter((row) => String(row.admin_chat_id) === String(chatId))
+      .filter((row) => String(row.source_chat_id) === String(chatId))
+      .filter((row) => !row.preview_message_id)
+      .filter((row) => ['PENDING', 'READY'].includes(String(row.status || '').toUpperCase()))
+      .filter((row) => {
+        const created = Date.parse(row.created_at || 0);
+        if (!Number.isFinite(created) || created < recentBefore) return false;
+        if (String(row.status).toUpperCase() === 'PENDING' && created < stalePendingBefore) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const byMessage = Number(a.source_message_id) - Number(b.source_message_id);
+        if (Number.isFinite(byMessage) && byMessage !== 0) return byMessage;
+        return Date.parse(a.created_at || 0) - Date.parse(b.created_at || 0);
+      });
+
+    for (const row of waiting) {
+      if (String(row.status || '').toUpperCase() === 'PENDING') break;
+      await sendPreview(row.id, chatId);
+    }
+  } finally {
+    const current = await getSetting(lockKey).catch(() => null);
+    if (current?.token === lockToken) await setSetting(lockKey, null).catch(() => {});
+
+    const dirty = await getSetting(dirtyKey).catch(() => null);
+    if (dirty) {
+      await setSetting(dirtyKey, null).catch(() => {});
+      await queueOrderedPreviewFlush(chatId).catch((error) => {
+        console.error('Ordered preview reflush failed:', error?.message || error);
+      });
+    }
+  }
 }
 
 async function handleExactDuplicate(message, duplicateResult) {
