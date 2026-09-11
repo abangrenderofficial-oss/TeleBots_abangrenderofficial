@@ -5,6 +5,10 @@ import { testGeminiConnection } from '../lib/assistant.js';
 import { duplicateNotice, inspectIncomingDuplicate } from '../lib/duplicates.js';
 import { telegramTextToHtml } from '../lib/entities.js';
 import {
+  maybeAutoNameUntitledDocument,
+  rememberUntitledMediaContext,
+} from '../lib/untitled-namer.js';
+import {
   formatProfileKeyboardRows,
   getFormatProfile,
   getProfileForItem,
@@ -38,7 +42,7 @@ import {
   updateQueueItem,
 } from '../lib/store.js';
 
-const BUILD_VERSION = 'format-learning-v2-fast-preview-buttons-total';
+const BUILD_VERSION = 'format-learning-v2-untitled-vision-only';
 const CALLBACK_DEBUG_KEY = 'telegram_callback_debug';
 const PREVIEW_BURST_SETTLE_MS = 180;
 
@@ -380,6 +384,12 @@ async function prepareMedia(message) {
     caption_replaced: false,
   });
 
+  // Store only the tiny Telegram media context needed by the isolated untitled
+  // naming path. Existing title/serial/format logic does not read this setting.
+  await rememberUntitledMediaContext({ itemId: item.id, media, message }).catch((error) => {
+    console.error('Untitled media context save failed:', error?.message || error);
+  });
+
   try {
     const resolved = await resolveFormatProfile({
       caption: message.caption || '',
@@ -458,6 +468,30 @@ async function prepareMedia(message) {
       resolved,
       draft,
     });
+
+    // NEW isolated path: only documents that are STILL untitled reach Gemini
+    // Vision. Anything with a real title exits immediately and all old logic stays untouched.
+    if (media.kind === 'document') {
+      const autoNamed = await maybeAutoNameUntitledDocument({
+        itemId: item.id,
+        chatId: message.chat.id,
+      }).catch((error) => {
+        console.error('Untitled auto-name failed:', error?.message || error);
+        return null;
+      });
+
+      if (autoNamed?.preview_message_id) {
+        await telegram('editMessageCaption', {
+          chat_id: message.chat.id,
+          message_id: autoNamed.preview_message_id,
+          caption: autoNamed.final_caption_html || '',
+          parse_mode: 'HTML',
+          reply_markup: inlineKeyboard(compactPreviewRows(autoNamed.id)),
+        }).catch((error) => {
+          console.error('Untitled auto-name preview edit failed:', error?.message || error);
+        });
+      }
+    }
   } catch (error) {
     const errorText = String(error?.message || error).slice(0, 1000);
     await updateQueueItem(item.id, {
@@ -1049,14 +1083,34 @@ function hasMedia(message) {
 }
 
 function identifyMedia(message) {
-  if (message.document) return { kind: 'document', fileName: message.document.file_name, fileUniqueId: message.document.file_unique_id };
+  if (message.document) return {
+    kind: 'document',
+    fileName: message.document.file_name,
+    fileUniqueId: message.document.file_unique_id,
+    fileId: message.document.file_id,
+  };
   if (message.photo) {
     const p = message.photo.at(-1);
-    return { kind: 'photo', fileUniqueId: p?.file_unique_id };
+    return { kind: 'photo', fileUniqueId: p?.file_unique_id, fileId: p?.file_id };
   }
-  if (message.video) return { kind: 'video', fileName: message.video.file_name, fileUniqueId: message.video.file_unique_id };
-  if (message.animation) return { kind: 'animation', fileName: message.animation.file_name, fileUniqueId: message.animation.file_unique_id };
-  if (message.audio) return { kind: 'audio', fileName: message.audio.file_name, fileUniqueId: message.audio.file_unique_id };
+  if (message.video) return {
+    kind: 'video',
+    fileName: message.video.file_name,
+    fileUniqueId: message.video.file_unique_id,
+    fileId: message.video.file_id,
+  };
+  if (message.animation) return {
+    kind: 'animation',
+    fileName: message.animation.file_name,
+    fileUniqueId: message.animation.file_unique_id,
+    fileId: message.animation.file_id,
+  };
+  if (message.audio) return {
+    kind: 'audio',
+    fileName: message.audio.file_name,
+    fileUniqueId: message.audio.file_unique_id,
+    fileId: message.audio.file_id,
+  };
   return { kind: 'other' };
 }
 
