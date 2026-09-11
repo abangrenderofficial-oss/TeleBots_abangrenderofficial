@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/telegram",
-      "destination": "/api/telegram-control"
+      "destination": "/api/telegram-command"
     }
   ]
 }
