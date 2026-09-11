@@ -27,6 +27,16 @@ import {
   removeWordButtonLabel,
 } from '../lib/remove-words.js';
 import {
+  buildResendBatchItems,
+  finishActiveSendBatch,
+  getActiveSendBatch,
+  isSendPaused,
+  pauseSending,
+  resumeSending,
+  saveActiveSendBatch,
+  startActiveSendBatch,
+} from '../lib/send-control.js';
+import {
   addMemory,
   clearChatHistory,
   createQueueItem,
@@ -42,7 +52,7 @@ import {
   updateQueueItem,
 } from '../lib/store.js';
 
-const BUILD_VERSION = 'format-learning-v2-photo-untitled-vision';
+const BUILD_VERSION = 'format-learning-v2-stop-resume-resend-ui';
 const CALLBACK_DEBUG_KEY = 'telegram_callback_debug';
 const PREVIEW_BURST_SETTLE_MS = 180;
 
@@ -122,6 +132,8 @@ async function handleMessage(message) {
   if (text === '/total') return sendTotal(chatId);
   if (text === '/pending') return sendPending(chatId);
   if (text === '/memories') return sendMemories(chatId);
+  if (text === '/stop') return stopSendActivity(chatId);
+  if (text === '/resume') return resumeSendActivity(chatId);
 
   if (text?.startsWith('/remember ')) {
     const memory = text.slice('/remember '.length).trim();
@@ -353,6 +365,42 @@ async function keepFocus(itemId) {
 async function deleteHelperPrompt(chatId, messageId) {
   if (!messageId) return;
   await telegram('deleteMessage', { chat_id: chatId, message_id: messageId }).catch(() => {});
+}
+
+async function stopSendActivity(chatId) {
+  const batch = await pauseSending(chatId);
+  const hasRemaining = Boolean(
+    batch
+    && !batch.completed
+    && Array.isArray(batch.item_ids)
+    && Number(batch.next_index || 0) < batch.item_ids.length
+  );
+
+  return telegram('sendMessage', {
+    chat_id: chatId,
+    text: hasRemaining
+      ? '⏸ SEND dah STOP. Betulkan preview yang perlu, lepas tu /resume untuk sambung dari baki item.'
+      : '⏸ SEND dah STOP. Apa-apa SEND baru pun akan ditahan sampai kau /resume.',
+  });
+}
+
+async function resumeSendActivity(chatId) {
+  const batch = await resumeSending(chatId);
+  const hasRemaining = Boolean(
+    batch
+    && !batch.completed
+    && Array.isArray(batch.item_ids)
+    && Number(batch.next_index || 0) < batch.item_ids.length
+  );
+
+  if (!hasRemaining) {
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: '▶️ SEND aktif semula. Tak ada batch tergantung untuk disambung.',
+    });
+  }
+
+  return continueSendBatch(chatId, batch);
 }
 
 async function prepareMedia(message) {
@@ -714,6 +762,28 @@ function compactPreviewRows(itemId) {
   ]];
 }
 
+async function compactRowsForItem(item) {
+  if (String(item?.status || '').toUpperCase() !== 'SENT') return compactPreviewRows(item.id);
+
+  const [lastSentId, fileRecordRaw] = await Promise.all([
+    getSetting('last_sent_item_id').catch(() => null),
+    getSetting('last_sent_file_record').catch(() => 0),
+  ]);
+  const fileRecord = Number.isFinite(Number(fileRecordRaw)) ? Number(fileRecordRaw) : 0;
+  const statusText = String(lastSentId) === String(item.id)
+    ? `🏁 LAST SENT · FILE ${fileRecord}`
+    : '✅ SENT';
+
+  return [
+    [{ text: statusText, callback_data: 'noop' }],
+    [
+      { text: '✏️', callback_data: `edit:${item.id}` },
+      { text: '🔁 SEND AGAIN', callback_data: `resend:${item.id}` },
+      { text: '🚀 SEND ALL', callback_data: `resendall:${item.id}` },
+    ],
+  ];
+}
+
 async function expandedPreviewRows(item, profile) {
   const removeTerms = await getFormatRemoveTerms(profile.id);
   const rows = formatProfileKeyboardRows(profile, item.id);
@@ -730,7 +800,7 @@ async function sendPreview(itemId, chatId) {
   const item = await getQueueItem(itemId);
   if (!item) return;
 
-  const rows = compactPreviewRows(item.id);
+  const rows = await compactRowsForItem(item);
 
   if (item.preview_message_id) {
     await telegram('deleteMessage', {
@@ -779,11 +849,12 @@ async function showCompactMenu(itemId, chatId, fallbackMessageId = null) {
   const messageId = item.preview_message_id || fallbackMessageId;
   if (!messageId) return;
 
+  const rows = await compactRowsForItem(item);
   await keepFocus(item.id);
   return telegram('editMessageReplyMarkup', {
     chat_id: chatId,
     message_id: messageId,
-    reply_markup: inlineKeyboard(compactPreviewRows(item.id)),
+    reply_markup: inlineKeyboard(rows),
   });
 }
 
@@ -843,6 +914,16 @@ async function handleCallback(query) {
 
   if (action === 'back') {
     return showCompactMenu(id, chatId, message.message_id);
+  }
+
+  if (action === 'resend') {
+    await setSetting('admin_state', null);
+    return sendItem(id, chatId, { forceResend: true });
+  }
+
+  if (action === 'resendall') {
+    await setSetting('admin_state', null);
+    return resendAllFrom(id, chatId);
   }
 
   if (action.startsWith('fmt_')) {
@@ -920,17 +1001,30 @@ async function handleCallback(query) {
   await debugCallback('callback_unhandled_action', { data, action, item_id: id });
 }
 
-async function sendItem(id, chatId) {
-  await debugCallback('send_item_start', { item_id: id, chat_id: chatId });
+async function sendItem(id, chatId, options = {}) {
+  const forceResend = Boolean(options.forceResend);
+  const fromBatch = Boolean(options.fromBatch);
+  await debugCallback('send_item_start', { item_id: id, chat_id: chatId, force_resend: forceResend });
+
+  if (await isSendPaused(chatId)) {
+    await debugCallback('send_item_paused', { item_id: id, chat_id: chatId });
+    if (!fromBatch) {
+      await telegram('sendMessage', {
+        chat_id: chatId,
+        text: '⏸ SEND tengah STOP. Guna /resume dulu.',
+      });
+    }
+    return { ok: false, paused: true };
+  }
 
   const item = await getQueueItem(id);
   if (!item) {
     await debugCallback('send_item_missing', { item_id: id, chat_id: chatId });
-    return;
+    return { ok: false, missing: true };
   }
-  if (item.status === 'SENT') {
+  if (item.status === 'SENT' && !forceResend) {
     await debugCallback('send_item_already_sent', { item_id: id, chat_id: chatId });
-    return;
+    return { ok: true, skipped: true };
   }
 
   const dbDestination = await getSetting('destination_chat_id');
@@ -948,7 +1042,10 @@ async function sendItem(id, chatId) {
   if (!destination) {
     await debugCallback('send_blocked_no_destination', { item_id: id, chat_id: chatId });
     await keepFocus(id);
-    return telegram('sendMessage', { chat_id: chatId, text: 'Destination belum set lagi. Dalam group target, hantar /connect sekali.' });
+    if (!fromBatch) {
+      await telegram('sendMessage', { chat_id: chatId, text: 'Destination belum set lagi. Dalam group target, hantar /connect sekali.' });
+    }
+    return { ok: false, no_destination: true };
   }
 
   try {
@@ -957,6 +1054,7 @@ async function sendItem(id, chatId) {
       destination: String(destination),
       source_chat_id: item.source_chat_id || null,
       source_message_id: item.source_message_id || null,
+      force_resend: forceResend,
     });
 
     const payload = {
@@ -965,6 +1063,7 @@ async function sendItem(id, chatId) {
       message_id: item.source_message_id,
       parse_mode: 'HTML',
       caption: item.final_caption_html || '',
+      __force_resend: forceResend,
     };
 
     const sent = await telegram('copyMessage', payload);
@@ -973,6 +1072,7 @@ async function sendItem(id, chatId) {
       item_id: id,
       destination: String(destination),
       destination_message_id: sent?.message_id || null,
+      force_resend: forceResend,
     });
 
     await updateQueueItem(id, {
@@ -988,42 +1088,126 @@ async function sendItem(id, chatId) {
       item_id: id,
       destination: String(destination),
       destination_message_id: sent?.message_id || null,
+      force_resend: forceResend,
     });
 
-    return telegram('sendMessage', {
-      chat_id: chatId,
-      text: `SENT\n${item.file_name || item.generated_title || 'Item'}`,
-    });
+    // No extra SENT bubble. The preview itself carries SENT/LAST SENT status and
+    // keeps EDIT + SEND AGAIN + SEND ALL controls.
+    return { ok: true, sent: true, destination_message_id: sent?.message_id || null };
   } catch (error) {
     const errorText = String(error?.message || error).slice(0, 1000);
     await debugCallback('send_failed', {
       item_id: id,
       destination: String(destination),
       error: errorText,
+      force_resend: forceResend,
     });
-    await updateQueueItem(id, { status: 'FAILED', error_message: errorText });
+
+    if (item.status === 'SENT') {
+      await updateQueueItem(id, { status: 'SENT', error_message: errorText });
+    } else {
+      await updateQueueItem(id, { status: 'FAILED', error_message: errorText });
+    }
     await keepFocus(id);
-    return telegram('sendMessage', { chat_id: chatId, text: `FAILED\n${errorText}` });
+
+    if (!fromBatch) {
+      await telegram('sendMessage', { chat_id: chatId, text: `FAILED\n${errorText}` });
+    }
+    return { ok: false, error: errorText };
   }
 }
 
 async function sendAll(chatId) {
+  if (await isSendPaused(chatId)) {
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: '⏸ SEND masih STOP. Guna /resume dulu.',
+    });
+  }
+
   const items = await listPending(50);
   if (!items.length) return telegram('sendMessage', { chat_id: chatId, text: 'Tak ada item pending.' });
 
-  let sent = 0;
-  let failed = 0;
-  for (const item of items) {
-    if (!['READY', 'FAILED'].includes(item.status)) continue;
-    await sendItem(item.id, chatId);
-    const after = await getQueueItem(item.id);
-    if (after?.status === 'SENT') sent += 1;
-    else failed += 1;
+  const batch = await startActiveSendBatch(chatId, items, 'normal');
+  return continueSendBatch(chatId, batch);
+}
+
+async function resendAllFrom(itemId, chatId) {
+  if (await isSendPaused(chatId)) {
+    return telegram('sendMessage', {
+      chat_id: chatId,
+      text: '⏸ SEND masih STOP. Guna /resume dulu.',
+    });
   }
 
+  const items = await buildResendBatchItems(chatId, itemId);
+  if (!items.length) {
+    return telegram('sendMessage', { chat_id: chatId, text: 'Tak ada item untuk resend dari sini.' });
+  }
+
+  const batch = await startActiveSendBatch(chatId, items, 'resend');
+  return continueSendBatch(chatId, batch);
+}
+
+async function continueSendBatch(chatId, batch) {
+  let working = {
+    ...batch,
+    item_ids: Array.isArray(batch?.item_ids) ? batch.item_ids : [],
+    next_index: Number(batch?.next_index || 0),
+    sent: Number(batch?.sent || 0),
+    failed: Number(batch?.failed || 0),
+  };
+
+  for (let index = working.next_index; index < working.item_ids.length; index += 1) {
+    if (await isSendPaused(chatId)) {
+      working.next_index = index;
+      await saveActiveSendBatch(chatId, working);
+      return null;
+    }
+
+    const item = await getQueueItem(working.item_ids[index]);
+    if (!item) {
+      working.next_index = index + 1;
+      await saveActiveSendBatch(chatId, working);
+      continue;
+    }
+
+    const status = String(item.status || '').toUpperCase();
+    const resendMode = working.mode === 'resend';
+    const eligible = resendMode
+      ? ['READY', 'FAILED', 'SENT'].includes(status)
+      : ['READY', 'FAILED'].includes(status);
+
+    if (!eligible) {
+      working.next_index = index + 1;
+      await saveActiveSendBatch(chatId, working);
+      continue;
+    }
+
+    const result = await sendItem(item.id, chatId, {
+      forceResend: resendMode && status === 'SENT',
+      fromBatch: true,
+    });
+
+    if (result?.paused) {
+      working.next_index = index;
+      await saveActiveSendBatch(chatId, working);
+      return null;
+    }
+
+    if (result?.ok && !result?.skipped) working.sent += 1;
+    else if (!result?.skipped) working.failed += 1;
+
+    working.next_index = index + 1;
+    await saveActiveSendBatch(chatId, working);
+  }
+
+  working = await finishActiveSendBatch(chatId, working);
+  const label = working.mode === 'resend' ? '✅ RESEND ALL selesai' : '✅ SEND ALL selesai';
+  const failedText = working.failed > 0 ? ` · ${working.failed} failed` : '';
   return telegram('sendMessage', {
     chat_id: chatId,
-    text: `Send all settle. Sent ${sent}, failed ${failed}.`,
+    text: `${label} · ${working.sent} sent${failedText}`,
   });
 }
 
@@ -1096,6 +1280,6 @@ function identifyMedia(message) {
 async function sendHelp(chatId) {
   return telegram('sendMessage', {
     chat_id: chatId,
-    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nPreview default sekarang compact: ✏️, SEND dan SEND ALL. Tekan ✏️ untuk buka setting format, BACK untuk tutup semula.\n\nSetiap format file belajar setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption dan Remove Word. Remove Word simpan word/ayat wajib buang untuk format tu.\n\n/total untuk kira live semua file/document dalam bot. Gambar/photo tak masuk kiraan file.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\nGroup destination: invite bot, kemudian /connect dalam group sekali.\n\n/version untuk check build yang tengah live.',
+    text: 'Aku AI assistant kau. Sembang je macam biasa, benda luar pasal bot pun boleh tanya.\n\nPreview default: ✏️, SEND dan SEND ALL. Lepas berjaya sent, preview kekal ada ✏️, SEND AGAIN dan SEND ALL.\n\n/stop untuk hentikan aktiviti send secepat mungkin. /resume sambung baki batch yang sama selepas kau betulkan preview.\n\nSetiap format file belajar setting sendiri: Tajuk, No Siri, Translate, Buang #, Tambah Caption dan Remove Word. Remove Word simpan word/ayat wajib buang untuk format tu.\n\n/total untuk kira live semua file/document dalam bot. Gambar/photo tak masuk kiraan file.\n\nBenda exact sama cuma auto-delete kalau benda asal memang dah berjaya SENT ke group.\n\nGroup destination: invite bot, kemudian /connect dalam group sekali.\n\n/version untuk check build yang tengah live.',
   });
 }
