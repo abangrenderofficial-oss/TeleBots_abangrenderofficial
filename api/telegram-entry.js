@@ -17,22 +17,36 @@ export default async function handler(req, res) {
 
   const chatId = message.chat.id;
   const sourceMessageId = message.message_id;
-
-  // Telegram may retry the same webhook. Never create another queue item for
-  // the exact same source message.
-  const replay = await getQueueItemBySourceMessage(chatId, chatId, sourceMessageId).catch(() => null);
-  if (replay) return globalHandler(req, res);
-
   const fileUniqueId = extractFileUniqueId(message);
   if (!fileUniqueId) return globalHandler(req, res);
 
-  // Top-level gate: do this BEFORE every other wrapper. This guarantees the old
-  // legacy auto-delete path can never eat a reviewed duplicate before the smart
-  // duplicate UI gets a chance to process it.
+  // Detect previously SENT exact media directly from DB. This sits above every
+  // legacy handler so duplicate review cannot fall back to deleteMessage.
   const matches = await findQueueItemsByFileUniqueId(chatId, fileUniqueId, 30).catch(() => []);
   const oldSent = (matches || []).find((row) => String(row?.status || '').toUpperCase() === 'SENT');
   if (!oldSent?.id) return globalHandler(req, res);
 
+  // Telegram can retry the same webhook. If the fresh duplicate row already
+  // exists, do NOT send it through the processing chain again. Just make sure it
+  // is registered in the grouped duplicate review and acknowledge the retry.
+  const replay = await getQueueItemBySourceMessage(chatId, chatId, sourceMessageId).catch(() => null);
+  if (replay?.id) {
+    if (String(replay.id) !== String(oldSent.id)) {
+      await markDuplicateForReview({
+        chatId,
+        itemId: replay.id,
+        matchId: oldSent.id,
+      }).catch(() => {});
+    }
+    return res.status(200).json({
+      ok: true,
+      webhook_replay: true,
+      duplicate_review: true,
+    });
+  }
+
+  // Allow THIS one Telegram source message through normal preview/caption logic.
+  // The override is scoped to chat + message id and is removed after processing.
   const overrideKey = `${DUP_OVERRIDE_PREFIX}${chatId}:${sourceMessageId}`;
   await setSetting(overrideKey, {
     allow: true,
