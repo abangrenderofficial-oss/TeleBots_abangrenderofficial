@@ -1,5 +1,7 @@
 import controlHandler from './telegram-control.js';
-import { telegram, isAdminMessage } from '../lib/telegram.js';
+import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
+import { formatProfileKeyboardRows, getProfileForItem } from '../lib/format-profiles.js';
+import { getFormatRemoveTerms, removeWordButtonLabel } from '../lib/remove-words.js';
 import { getQueueItem, getSetting, setSetting } from '../lib/store.js';
 
 const COMMAND_TEXT = [
@@ -61,30 +63,41 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, command_list: true });
   }
 
-  // Reliability fix for previews created BEFORE LIVE GROUP SYNC existed.
-  // Their old ✏️ button still contains edit:<itemId>, so when the owner taps it
-  // we immediately force the destination message to match the CURRENT caption
-  // stored in DB. This repairs stale group captions even when the DB caption had
-  // already been corrected earlier (meaning before/after comparison sees no new
-  // change and the newer safety layer would otherwise skip the sync).
-  let forcedItem = null;
-  let forcedChatId = null;
+  // Explicit manual sync is the final authority. This is intentionally simple:
+  // take the caption currently stored on the queue item and patch the exact
+  // destination message that was created when that item was SENT.
   if (query?.message && isAdminMessage({ from: query.from })) {
     const data = String(query.data || '');
     const [action, id] = data.split(':');
-    if (id && (action === 'edit' || action === 'back')) {
-      forcedItem = await getQueueItem(id).catch(() => null);
-      forcedChatId = query.message.chat.id;
+    if (action === 'update_group' && id) {
+      return updateExactGroupMessage(query, res, id);
+    }
+  }
+
+  let sentEditId = null;
+  let sentEditChatId = null;
+  if (query?.message && isAdminMessage({ from: query.from })) {
+    const data = String(query.data || '');
+    const [action, id] = data.split(':');
+    if (action === 'edit' && id) {
+      const item = await getQueueItem(id).catch(() => null);
+      if (isSentWithDestination(item)) {
+        sentEditId = id;
+        sentEditChatId = query.message.chat.id;
+      }
     }
   }
 
   const shadow = createShadowResponse();
   await controlHandler(req, shadow);
 
-  if (forcedItem?.id && forcedChatId != null) {
-    const latest = await getQueueItem(forcedItem.id).catch(() => forcedItem);
+  // Old previews keep their old button payload forever, but pressing their
+  // existing ✏️ still comes through here. Upgrade that edit menu on demand by
+  // adding one explicit UPDATE GROUP button. No need to recreate old previews.
+  if (sentEditId && sentEditChatId != null) {
+    const latest = await getQueueItem(sentEditId).catch(() => null);
     if (isSentWithDestination(latest)) {
-      await forceCurrentCaptionToGroup(latest, forcedChatId).catch(() => {});
+      await decorateSentEditWithUpdate(sentEditChatId, latest).catch(() => {});
     }
   }
 
@@ -100,7 +113,19 @@ function isSentWithDestination(item) {
   );
 }
 
-async function forceCurrentCaptionToGroup(item, adminChatId) {
+async function updateExactGroupMessage(query, res, itemId) {
+  const adminChatId = query.message.chat.id;
+  const item = await getQueueItem(itemId).catch(() => null);
+
+  if (!isSentWithDestination(item)) {
+    await telegram('answerCallbackQuery', {
+      callback_query_id: query.id,
+      text: 'Item ni tak ada destination SENT yang boleh di-update.',
+      show_alert: true,
+    }).catch(() => {});
+    return res.status(200).json({ ok: true, updated_group: false });
+  }
+
   try {
     await telegram('editMessageCaption', {
       chat_id: item.destination_chat_id,
@@ -108,38 +133,82 @@ async function forceCurrentCaptionToGroup(item, adminChatId) {
       caption: item.final_caption_html || '',
       parse_mode: 'HTML',
     });
+
     await setSetting(`sent_live_sync:${item.id}`, {
       ok: true,
-      source: 'old_preview_edit_force_sync',
+      source: 'explicit_update_group_button',
       destination_chat_id: String(item.destination_chat_id),
       destination_message_id: item.destination_message_id,
       synced_at: new Date().toISOString(),
     }).catch(() => {});
+
+    await telegram('answerCallbackQuery', {
+      callback_query_id: query.id,
+      text: '✅ Group caption updated.',
+    }).catch(() => {});
+
+    return res.status(200).json({ ok: true, updated_group: true, item_id: item.id });
   } catch (error) {
     const text = String(error?.message || error);
+
     if (/message is not modified/i.test(text)) {
       await setSetting(`sent_live_sync:${item.id}`, {
         ok: true,
-        source: 'old_preview_already_current',
+        source: 'explicit_update_group_already_current',
         destination_chat_id: String(item.destination_chat_id),
         destination_message_id: item.destination_message_id,
         synced_at: new Date().toISOString(),
       }).catch(() => {});
-      return;
+
+      await telegram('answerCallbackQuery', {
+        callback_query_id: query.id,
+        text: '✅ Group memang dah guna caption latest.',
+      }).catch(() => {});
+      return res.status(200).json({ ok: true, updated_group: true, already_current: true });
     }
 
     await setSetting(`sent_live_sync:${item.id}`, {
       ok: false,
-      source: 'old_preview_edit_force_sync',
+      source: 'explicit_update_group_button',
       error: text.slice(0, 500),
       failed_at: new Date().toISOString(),
     }).catch(() => {});
 
+    await telegram('answerCallbackQuery', {
+      callback_query_id: query.id,
+      text: text.slice(0, 180),
+      show_alert: true,
+    }).catch(() => {});
+
     await telegram('sendMessage', {
       chat_id: adminChatId,
-      text: `⚠️ LIVE GROUP SYNC gagal untuk item ni. ${text}`.slice(0, 1000),
+      text: `⚠️ UPDATE GROUP gagal untuk item ni. ${text}`.slice(0, 1000),
     }).catch(() => {});
+
+    return res.status(200).json({ ok: true, updated_group: false, error: text });
   }
+}
+
+async function decorateSentEditWithUpdate(chatId, item) {
+  if (!item?.preview_message_id) return;
+  const profile = await getProfileForItem(item).catch(() => null);
+  if (!profile) return;
+
+  const removeTerms = await getFormatRemoveTerms(profile.id).catch(() => []);
+  const rows = formatProfileKeyboardRows(profile, item.id);
+
+  if (rows.length) rows.shift();
+  if (rows.length) rows.pop();
+  rows.unshift([{ text: '✅ SENT · EDIT MODE', callback_data: 'noop' }]);
+  rows.push([{ text: removeWordButtonLabel(removeTerms), callback_data: `fmt_removeword:${item.id}` }]);
+  rows.push([{ text: '🔄 UPDATE GROUP', callback_data: `update_group:${item.id}` }]);
+  rows.push([{ text: '⬅️ BACK', callback_data: `back:${item.id}` }]);
+
+  await telegram('editMessageReplyMarkup', {
+    chat_id: chatId,
+    message_id: item.preview_message_id,
+    reply_markup: inlineKeyboard(rows),
+  });
 }
 
 function createShadowResponse() {
