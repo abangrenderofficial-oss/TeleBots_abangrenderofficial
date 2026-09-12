@@ -1,6 +1,7 @@
 import { routeUpdate } from '../lib/bot/update-router.js';
+import { rejectUnauthorizedTelegramWebhook } from '../lib/bot/core/telegram-webhook-auth.js';
 
-const BUILD_MARKER = 'recaption-sync-format-gate-v2';
+const BUILD_MARKER = 'recaption-sync-format-gate-auth-v3';
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
@@ -12,6 +13,8 @@ export default async function handler(req, res) {
       commit: process.env.VERCEL_GIT_COMMIT_SHA || null,
     });
   }
+
+  if (rejectUnauthorizedTelegramWebhook(req, res)) return;
 
   try {
     return await routeUpdate(req, res);
