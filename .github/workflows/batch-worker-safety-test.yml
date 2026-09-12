@@ -1,0 +1,27 @@
+name: Batch Worker Safety Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/batch-worker-safety-test.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for production deploy
+        run: sleep 15
+      - name: Exercise explicit worker against invalid destination
+        shell: bash
+        run: |
+          set -e
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w "%{http_code}" \
+            -X POST 'https://tele-bots-abangrenderofficial.vercel.app/api/send-batch-worker' \
+            -H 'content-type: application/json' \
+            --data '{"batch_id":"TEST_SAFE_WORKER_20260912_2","worker_secret":"test_safe_secret_20260912_2"}')
+          cat "$body"
+          echo
+          echo "HTTP $code"
+          test "$code" = "200"
