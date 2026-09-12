@@ -13,15 +13,24 @@ jobs:
         run: |
           set -e
           URL="https://tele-bots-abangrenderofficial.vercel.app/api/repair-webhook"
-          for i in {1..12}; do
+          EXPECTED='"url":"https://tele-bots-abangrenderofficial.vercel.app/api/telegram"'
+
+          for i in {1..18}; do
             echo "Attempt $i"
             code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" -X POST "$URL" || true)
             cat /tmp/body.txt || true
             echo
-            if [ "$code" = "200" ]; then
+
+            # HTTP 200 alone is NOT enough: the production alias may still be
+            # serving the previous deployment. Only succeed when the endpoint
+            # confirms it registered the current stable webhook URL.
+            if [ "$code" = "200" ] && grep -Fq "$EXPECTED" /tmp/body.txt; then
+              echo "Webhook confirmed on stable /api/telegram endpoint"
               exit 0
             fi
+
             sleep 10
           done
-          echo "Webhook repair endpoint did not become ready in time"
+
+          echo "Webhook repair did not confirm the stable endpoint in time"
           exit 1
