@@ -8,26 +8,20 @@ jobs:
   repair:
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for Vercel production, repair webhook, and apply one-time caption fix
+      - name: Wait for Vercel production and repair webhook
         shell: bash
         run: |
           set -e
           URL="https://tele-bots-abangrenderofficial.vercel.app/api/repair-webhook"
-          PATCH_URL="https://tele-bots-abangrenderofficial.vercel.app/api/telegram-command?manual_patch=_F1QOnLQk2x8-IFANiYSrM4_hXtgWS0F"
           for i in {1..12}; do
             echo "Attempt $i"
             code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" -X POST "$URL" || true)
             cat /tmp/body.txt || true
             echo
             if [ "$code" = "200" ]; then
-              patch_code=$(curl -sS -o /tmp/patch.txt -w "%{http_code}" "$PATCH_URL" || true)
-              cat /tmp/patch.txt || true
-              echo
-              if [ "$patch_code" = "200" ] && grep -q '"group_updated":true' /tmp/patch.txt; then
-                exit 0
-              fi
+              exit 0
             fi
             sleep 10
           done
-          echo "Webhook repair or one-time caption patch did not complete in time"
+          echo "Webhook repair endpoint did not become ready in time"
           exit 1
