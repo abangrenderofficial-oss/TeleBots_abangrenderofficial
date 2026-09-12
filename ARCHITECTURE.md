@@ -41,32 +41,49 @@ Every slash command has its own file under `lib/bot/commands/`.
 - RESET BATCH -> `lib/bot/batch/reset.js`
 - Batch callback matching only -> `lib/bot/batch/router.js`
 - Shared worker/destination helpers -> `lib/bot/batch/shared.js`
-- Batch persistence -> existing `lib/explicit-batches.js`
+- Batch persistence -> `lib/explicit-batches.js`
 - Worker execution -> `api/telegram-sendall.js`
 
-A SEND ALL change must not require editing `/menu`, memory, AI, caption, connect, or reset modules.
+A SEND ALL change must not require editing `/menu`, memory, AI, caption, connect, reset or preview modules.
+
+## Feature ownership
+
+All non-command live behavior is split under `lib/bot/features/`.
+
+- AI/general chat -> `features/agent-chat.js`
+- Incoming media processing / duplicate detection / preview ordering -> `features/media.js`
+- Preview layout and edit UI -> `features/preview-ui.js`
+- Preview inline-button callbacks -> `features/preview-callbacks.js`
+- Single SEND / SEND AGAIN -> `features/send-one.js`
+- Text input while an edit state is active -> `features/state-input.js`
+- Focus/helper state -> `features/context.js`
+- Non-command message routing -> `features/message-router.js`
+- Feature routing only -> `features/router.js`
+
+`api/telegram.js` remains in the repository only as historical compatibility/reference code. The production webhook router does not call it.
 
 ## Core ownership
 
 - Command parsing -> `lib/bot/core/command.js`
 - Admin identity -> `lib/bot/core/auth.js`
 - Raw Telegram transport -> `lib/bot/core/telegram-client.js`
+- Callback diagnostics -> `lib/bot/core/debug.js`
 - Stable constants -> `lib/bot/core/constants.js`
 
 Core files must not contain product/business behavior.
 
-## Legacy feature engine
-
-`api/telegram.js` is compatibility code for non-command behavior that has not yet been physically split: AI chat, media processing, preview formatting/editing, single SEND and format controls.
-
-It is reachable only through `lib/bot/legacy-adapter.js` after command and explicit-batch routers decline an update. It must never own webhook registration, `/menu`, `/stop`, `/resume`, `/resetbatch` or SEND ALL batch creation again.
-
-When a legacy feature is changed next, extract that feature into its own `lib/bot/features/<topic>.js` module first instead of adding more code to `api/telegram.js`.
-
 ## Webhook rule
 
-Normal bot operations must never decide which production webhook URL Telegram uses. Webhook registration belongs only to the dedicated repair/setup path.
+Normal bot operations must never choose a different production webhook route. Webhook registration belongs only to the dedicated repair/setup path. The production ingress remains `api/telegram-safe-destination.js`.
 
 ## Change discipline
 
 Before editing code, identify the topic owner from this file. Modify only that owner plus its direct tests. If a change appears to require an unrelated module, stop and verify the boundary instead of patching across domains.
+
+Examples:
+
+- User asks to change `/menu` -> edit `commands/menu.js` only.
+- User asks to change `/stop` -> edit `commands/stop.js` and, only if stop behavior itself changes, `batch/control.js`.
+- User asks to change SEND ALL speed -> edit batch worker/start files only; never command files.
+- User asks to change caption parsing -> edit media/format modules only; never webhook or batch reset.
+- User asks to change reset behavior -> edit `batch/reset.js` only; never SEND ALL selection logic.
