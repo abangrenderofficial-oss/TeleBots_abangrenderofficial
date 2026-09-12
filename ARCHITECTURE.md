@@ -8,7 +8,7 @@ One user topic must map to one owned module/domain. Do not edit unrelated domain
 
 Telegram production webhook -> `api/telegram-safe-destination.js` -> `lib/bot/update-router.js`.
 
-The ingress file contains no business logic. It only delegates.
+The ingress file contains no business logic. It only delegates. `api/telegram.js` is only a compatibility alias to the same isolated ingress, so an old webhook URL cannot revive a second router.
 
 ## Command ownership
 
@@ -60,7 +60,7 @@ All non-command live behavior is split under `lib/bot/features/`.
 - Non-command message routing -> `features/message-router.js`
 - Feature routing only -> `features/router.js`
 
-`api/telegram.js` remains in the repository only as historical compatibility/reference code. The production webhook router does not call it.
+The old Telegram monolith is no longer reachable through the live webhook path. Its former `/api/telegram` route now exports the isolated safe endpoint instead.
 
 ## Core ownership
 
