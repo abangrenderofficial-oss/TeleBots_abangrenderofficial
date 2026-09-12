@@ -1,6 +1,6 @@
 import { routeUpdate } from '../lib/bot/update-router.js';
 
-const BUILD_MARKER = 'recaption-sync-format-gate-v1';
+const BUILD_MARKER = 'recaption-sync-format-gate-v2';
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
