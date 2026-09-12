@@ -1,0 +1,33 @@
+name: Smoke Final Format Resume
+
+on:
+  push:
+    branches: [smoke/final-format-flow]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger production /resume through Telegram webhook
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://tele-bots-abangrenderofficial.vercel.app/api/telegram-safe-destination"
+          cat > /tmp/body.json <<'JSON'
+          {
+            "update_id": 990013,
+            "message": {
+              "message_id": 990013,
+              "from": {"id": 6749355196, "is_bot": false, "first_name": "Smoke"},
+              "chat": {"id": 6749355196, "type": "private"},
+              "date": 1789220013,
+              "text": "/resume",
+              "entities": [{"offset": 0, "length": 7, "type": "bot_command"}]
+            }
+          }
+          JSON
+          code=$(curl -sS -o /tmp/response.json -w "%{http_code}" -X POST "$URL" -H 'Content-Type: application/json' --data-binary @/tmp/body.json)
+          cat /tmp/response.json
+          echo
+          test "$code" = "200"
+          grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' /tmp/response.json
