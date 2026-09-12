@@ -8,6 +8,7 @@ import {
   shouldKickNextWorker,
 } from '../lib/bot/batch/send-policy.js';
 import { claimNextOrderedBatchItem } from '../lib/bot/batch/ordered-claim.js';
+import { copyWithTelegramRateLimitRetry } from '../lib/bot/batch/send-executor.js';
 
 test('worker policy sends larger sequential chunks without unlimited invocation loops', () => {
   assert.equal(MAX_ITEMS_PER_INVOCATION, 12);
@@ -23,6 +24,48 @@ test('Telegram explicit retry_after is recognized but unrelated failures are not
   );
   assert.equal(parseTelegramRetryAfterMs(new Error('Bad Request: chat not found')), null);
   assert.equal(parseTelegramRetryAfterMs(new Error('fetch failed')), null);
+});
+
+test('rate-limit executor waits and retries the same item in place', async () => {
+  const calls = [];
+  const waits = [];
+  const payload = { message_id: 17 };
+
+  const result = await copyWithTelegramRateLimitRetry({
+    payload,
+    copy: async (received) => {
+      calls.push(received.message_id);
+      if (calls.length === 1) {
+        throw new Error('Telegram copyMessage failed: Too Many Requests: retry after 2');
+      }
+      return { message_id: 501 };
+    },
+    sleepFn: async (ms) => {
+      waits.push(ms);
+    },
+  });
+
+  assert.deepEqual(calls, [17, 17]);
+  assert.deepEqual(waits, [2_250]);
+  assert.equal(result.message_id, 501);
+});
+
+test('rate-limit executor does not blindly retry ambiguous or permanent failures', async () => {
+  let calls = 0;
+  await assert.rejects(
+    copyWithTelegramRateLimitRetry({
+      payload: { message_id: 19 },
+      copy: async () => {
+        calls += 1;
+        throw new Error('Bad Request: chat not found');
+      },
+      sleepFn: async () => {
+        throw new Error('sleep should not run');
+      },
+    }),
+    /chat not found/,
+  );
+  assert.equal(calls, 1);
 });
 
 test('duplicate worker does not fan out while another item is SENDING', () => {
@@ -70,7 +113,7 @@ test('ordered claim migration serializes by batch and blocks jumping past SENDIN
   assert.match(sql, /v_row\.status <> 'PENDING'/);
 });
 
-test('worker uses ordered claims and only rate-limit-specific retry', async () => {
+test('worker uses ordered claims and tested rate-limit retry executor', async () => {
   const worker = await readFile(new URL('../api/telegram-sendall.js', import.meta.url), 'utf8');
   assert.match(worker, /claimNextOrderedBatchItem/);
   assert.doesNotMatch(worker, /claimNextBatchItem\(/);
