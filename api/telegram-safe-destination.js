@@ -1,13 +1,22 @@
 import mainHandler from './telegram.js';
-import { isAdminMessage, telegram } from '../lib/telegram.js';
+import { isAdminMessage } from '../lib/telegram.js';
 import { getSetting, listQueueItems, setSetting } from '../lib/store.js';
 
+const SAFE_WEBHOOK_URL = 'https://tele-bots-abangrenderofficial.vercel.app/api/telegram-safe-destination';
 const RESET_PENDING_PREFIX = 'resetbatch_pending:';
 const RESET_PENDING_TTL_MS = 10 * 60 * 1000;
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
-  if (req.method !== 'POST') return mainHandler(req, res);
+
+  // Keep Telegram pinned to this wrapper. The legacy main handler still has an
+  // old self-heal target, so we re-assert the safe endpoint before and after any
+  // fallback into the legacy handler.
+  await ensureSafeWebhook().catch(() => {});
+
+  if (req.method !== 'POST') {
+    return runMainSafely(req, res);
+  }
 
   const update = req.body || {};
   const message = update.message;
@@ -27,15 +36,11 @@ export default async function handler(req, res) {
     const data = String(query.data || '');
 
     if (data === 'hard_resume') return resumeFromButton(chatId, query, req, res);
-    if (data === 'resetbatch_prepare') {
-      await telegram('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
-      return prepareResetBatch(chatId, res);
-    }
     if (data === 'resetbatch_confirm') return confirmResetBatch(chatId, query, res);
     if (data === 'resetbatch_cancel') return cancelResetBatch(chatId, query, res);
   }
 
-  return mainHandler(req, res);
+  return runMainSafely(req, res);
 }
 
 function isCommand(text, command) {
@@ -72,7 +77,7 @@ async function showMenu(chatId, res) {
     '/menu — buka menu ni semula',
   ].join('\n');
 
-  await telegram('sendMessage', { chat_id: chatId, text });
+  await rawBot('sendMessage', { chat_id: chatId, text });
   return res.status(200).json({ ok: true, menu: true });
 }
 
@@ -100,7 +105,7 @@ async function hardStop(chatId, res) {
   const remaining = batch?.completed ? 0 : Math.max(0, total - nextIndex);
   const sent = Math.max(0, Number(batch?.sent || 0));
 
-  await telegram('sendMessage', {
+  await rawBot('sendMessage', {
     chat_id: chatId,
     text: total
       ? `⛔ HARD STOP\nBatch dihentikan. ${sent} sent · ${remaining} remaining.`
@@ -108,7 +113,7 @@ async function hardStop(chatId, res) {
     reply_markup: {
       inline_keyboard: [[
         { text: '▶️ RESUME', callback_data: 'hard_resume' },
-        { text: '🗑 RESET BATCH', callback_data: 'resetbatch_prepare' },
+        { text: '🗑 RESET BATCH', callback_data: 'resetbatch_confirm' },
       ]],
     },
   });
@@ -125,11 +130,11 @@ async function prepareResetBatch(chatId, res) {
 
   const prepared = await buildResetSnapshot(chatId);
   if (!prepared.ok) {
-    await telegram('sendMessage', { chat_id: chatId, text: prepared.message });
+    await rawBot('sendMessage', { chat_id: chatId, text: prepared.message });
     return res.status(200).json({ ok: true, resetbatch: false, reason: prepared.reason });
   }
 
-  await telegram('sendMessage', {
+  await rawBot('sendMessage', {
     chat_id: chatId,
     text: `⚠️ RESET BATCH\nBatch: ${prepared.batchId}\nJumpa ${prepared.count} mesej yang batch ni berjaya hantar ke group.\n\nDelete untuk semua ahli group?`,
     reply_markup: {
@@ -186,13 +191,13 @@ async function buildResetSnapshot(chatId) {
 }
 
 async function confirmResetBatch(chatId, query, res) {
-  await telegram('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
+  await rawBot('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
 
   let pending = await getSetting(`${RESET_PENDING_PREFIX}${chatId}`).catch(() => null);
   if (!pending?.message_ids?.length) {
     const prepared = await buildResetSnapshot(chatId);
     if (!prepared.ok) {
-      await telegram('sendMessage', { chat_id: chatId, text: prepared.message });
+      await rawBot('sendMessage', { chat_id: chatId, text: prepared.message });
       return res.status(200).json({ ok: true, deleted: 0, reason: prepared.reason });
     }
     pending = await getSetting(`${RESET_PENDING_PREFIX}${chatId}`).catch(() => null);
@@ -201,7 +206,7 @@ async function confirmResetBatch(chatId, query, res) {
   const preparedAt = Date.parse(pending?.prepared_at || 0);
   if (!Number.isFinite(preparedAt) || Date.now() - preparedAt > RESET_PENDING_TTL_MS) {
     await setSetting(`${RESET_PENDING_PREFIX}${chatId}`, null).catch(() => {});
-    await telegram('sendMessage', { chat_id: chatId, text: 'Confirmation RESET BATCH dah expired. Hantar /resetbatch semula.' });
+    await rawBot('sendMessage', { chat_id: chatId, text: 'Confirmation RESET BATCH dah expired. Hantar /resetbatch semula.' });
     return res.status(200).json({ ok: true, deleted: 0, expired: true });
   }
 
@@ -224,7 +229,7 @@ async function confirmResetBatch(chatId, query, res) {
 
   await setSetting(`${RESET_PENDING_PREFIX}${chatId}`, null).catch(() => {});
 
-  await telegram('sendMessage', {
+  await rawBot('sendMessage', {
     chat_id: chatId,
     text: result.failed
       ? `🗑 RESET BATCH selesai. ${result.deleted} mesej deleted untuk semua · ${result.failed} gagal delete.`
@@ -235,14 +240,14 @@ async function confirmResetBatch(chatId, query, res) {
 }
 
 async function cancelResetBatch(chatId, query, res) {
-  await telegram('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
+  await rawBot('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
   await setSetting(`${RESET_PENDING_PREFIX}${chatId}`, null).catch(() => {});
-  await telegram('sendMessage', { chat_id: chatId, text: 'RESET BATCH dibatalkan. SEND masih STOP.' });
+  await rawBot('sendMessage', { chat_id: chatId, text: 'RESET BATCH dibatalkan. SEND masih STOP.' });
   return res.status(200).json({ ok: true, cancelled: true });
 }
 
 async function resumeFromButton(chatId, query, req, res) {
-  await telegram('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
+  await rawBot('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
   await setSetting(`send_paused:${chatId}`, {
     paused: false,
     hard_stop: false,
@@ -263,22 +268,33 @@ async function resumeFromButton(chatId, query, req, res) {
       },
     },
   }, shadow).catch(async (error) => {
-    await telegram('sendMessage', { chat_id: chatId, text: `Resume gagal: ${String(error?.message || error).slice(0, 500)}` }).catch(() => {});
+    await rawBot('sendMessage', { chat_id: chatId, text: `Resume gagal: ${String(error?.message || error).slice(0, 500)}` }).catch(() => {});
   });
 
-  return res.status(200).json({ ok: true, resumed: true });
+  await ensureSafeWebhook().catch(() => {});
+  return res.status(200).json(shadow.body || { ok: true, resumed: true });
+}
+
+async function runMainSafely(req, res) {
+  const shadow = createShadowResponse();
+  await mainHandler(req, shadow).catch((error) => {
+    shadow.status(200).json({ ok: true, handled: false, error: String(error?.message || error).slice(0, 500) });
+  });
+  await ensureSafeWebhook().catch(() => {});
+
+  for (const [name, value] of Object.entries(shadow.headers || {})) {
+    try { res.setHeader(name, value); } catch {}
+  }
+  return res.status(shadow.statusCode || 200).json(shadow.body ?? { ok: true });
 }
 
 async function deleteGroupMessages(chatId, messageIds) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) return { deleted: 0, failed: messageIds.length };
-
   let deleted = 0;
   let failed = 0;
 
   for (let i = 0; i < messageIds.length; i += 100) {
     const chunk = messageIds.slice(i, i + 100);
-    const bulk = await rawTelegram(token, 'deleteMessages', {
+    const bulk = await rawBot('deleteMessages', {
       chat_id: chatId,
       message_ids: chunk,
     }).catch(() => null);
@@ -289,7 +305,7 @@ async function deleteGroupMessages(chatId, messageIds) {
     }
 
     for (const messageId of chunk) {
-      const one = await rawTelegram(token, 'deleteMessage', {
+      const one = await rawBot('deleteMessage', {
         chat_id: chatId,
         message_id: messageId,
       }).catch(() => null);
@@ -301,7 +317,18 @@ async function deleteGroupMessages(chatId, messageIds) {
   return { deleted, failed };
 }
 
-async function rawTelegram(token, method, payload) {
+async function ensureSafeWebhook() {
+  return rawBot('setWebhook', {
+    url: SAFE_WEBHOOK_URL,
+    allowed_updates: ['message', 'callback_query'],
+    drop_pending_updates: false,
+  });
+}
+
+async function rawBot(method, payload = {}) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not configured');
+
   const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
