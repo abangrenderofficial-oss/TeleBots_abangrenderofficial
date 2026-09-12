@@ -90,6 +90,22 @@ export default async function handler(req, res) {
         throw new Error('Telegram returned invalid destination message ID');
       }
 
+      // If Telegram's old exact-occurrence dedupe says this message already
+      // existed BEFORE this explicit batch, do not attach that older group
+      // message to the new batch. Otherwise RESET THIS BATCH could delete a
+      // message belonging to a previous batch.
+      if (sent?.__deduped) {
+        await markBatchItemSkipped(batchId, claim.position, 'Already sent before this explicit batch');
+        await updateQueueItem(item.id, {
+          status: 'SENT',
+          destination_chat_id: String(current.destination_chat_id),
+          destination_message_id: destinationMessageId,
+          error_message: null,
+        }).catch(() => {});
+        processed += 1;
+        continue;
+      }
+
       await markBatchItemSent(batchId, claim.position, destinationMessageId);
 
       await recordBatchMessage({
