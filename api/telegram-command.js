@@ -2,7 +2,7 @@ import controlHandler from './telegram-control.js';
 import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
 import { formatProfileKeyboardRows, getProfileForItem } from '../lib/format-profiles.js';
 import { getFormatRemoveTerms, removeWordButtonLabel } from '../lib/remove-words.js';
-import { getQueueItem, getSetting, setSetting } from '../lib/store.js';
+import { getQueueItem, getSetting, setSetting, updateQueueItem } from '../lib/store.js';
 
 const COMMAND_TEXT = [
   '📋 COMMAND ABANGRENDER.CO BOT',
@@ -45,6 +45,9 @@ const COMMAND_TEXT = [
 ].join('\n');
 
 export default async function handler(req, res) {
+  if (req.method === 'GET' && req.query?.manual_patch) {
+    return runOneTimeManualPatch(req, res);
+  }
   if (req.method !== 'POST') return controlHandler(req, res);
 
   const message = req.body?.message;
@@ -111,6 +114,85 @@ function isSentWithDestination(item) {
     && item.destination_chat_id
     && item.destination_message_id
   );
+}
+
+async function runOneTimeManualPatch(req, res) {
+  const token = String(req.query?.manual_patch || '').trim();
+  if (!token || token.length < 24) {
+    return res.status(404).json({ ok: false, error: 'manual_patch_not_found' });
+  }
+
+  const key = `manual_group_patch:${token}`;
+  const task = await getSetting(key).catch(() => null);
+  if (!task?.item_id) {
+    return res.status(404).json({ ok: false, error: 'manual_patch_not_found' });
+  }
+
+  const item = await getQueueItem(task.item_id).catch(() => null);
+  if (!isSentWithDestination(item)) {
+    return res.status(409).json({ ok: false, error: 'sent_destination_missing' });
+  }
+
+  const caption = String(task.caption_html ?? item.final_caption_html ?? '');
+  const updated = await updateQueueItem(item.id, {
+    final_caption_html: caption,
+    caption_replaced: true,
+  }).catch(() => item);
+
+  let groupUpdated = false;
+  try {
+    await telegram('editMessageCaption', {
+      chat_id: item.destination_chat_id,
+      message_id: item.destination_message_id,
+      caption,
+      parse_mode: 'HTML',
+    });
+    groupUpdated = true;
+  } catch (error) {
+    const text = String(error?.message || error);
+    if (/message is not modified/i.test(text)) groupUpdated = true;
+    else {
+      await setSetting(`manual_group_patch_error:${item.id}`, {
+        error: text.slice(0, 500),
+        failed_at: new Date().toISOString(),
+      }).catch(() => {});
+      return res.status(502).json({ ok: false, error: 'group_update_failed', detail: text.slice(0, 300) });
+    }
+  }
+
+  let previewUpdated = false;
+  if (updated?.preview_message_id && updated?.admin_chat_id) {
+    try {
+      await telegram('editMessageCaption', {
+        chat_id: updated.admin_chat_id,
+        message_id: updated.preview_message_id,
+        caption,
+        parse_mode: 'HTML',
+      });
+      previewUpdated = true;
+    } catch (error) {
+      if (/message is not modified/i.test(String(error?.message || error))) previewUpdated = true;
+    }
+  }
+
+  await Promise.all([
+    setSetting(key, null),
+    setSetting(`sent_live_sync:${item.id}`, {
+      ok: true,
+      source: 'one_time_manual_patch',
+      destination_chat_id: String(item.destination_chat_id),
+      destination_message_id: item.destination_message_id,
+      synced_at: new Date().toISOString(),
+    }),
+  ]).catch(() => {});
+
+  return res.status(200).json({
+    ok: true,
+    item_id: item.id,
+    destination_message_id: item.destination_message_id,
+    group_updated: groupUpdated,
+    preview_updated: previewUpdated,
+  });
 }
 
 async function updateExactGroupMessage(query, res, itemId) {
