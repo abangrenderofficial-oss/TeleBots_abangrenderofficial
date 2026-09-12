@@ -1,3 +1,4 @@
+import { rejectUnauthorizedTelegramWebhook } from '../lib/bot/core/telegram-webhook-auth.js';
 import globalHandler from './telegram-global.js';
 import { isAdminMessage } from '../lib/telegram.js';
 import { markDuplicateForReview } from '../lib/duplicate-review.js';
@@ -10,6 +11,7 @@ import {
 const DUP_OVERRIDE_PREFIX = 'duplicate_override:';
 
 export default async function handler(req, res) {
+  if (req.method === 'POST' && rejectUnauthorizedTelegramWebhook(req, res)) return;
   if (req.method !== 'POST') return globalHandler(req, res);
 
   const message = req.body?.message;

@@ -1,3 +1,5 @@
+import { telegramWebhookSecret } from '../lib/bot/core/telegram-webhook-auth.js';
+
 const SAFE_WEBHOOK_URL = 'https://tele-bots-abangrenderofficial.vercel.app/api/telegram-safe-destination';
 
 export default async function handler(req, res) {
@@ -16,6 +18,7 @@ export default async function handler(req, res) {
         url: SAFE_WEBHOOK_URL,
         allowed_updates: ['message', 'callback_query'],
         drop_pending_updates: false,
+        secret_token: telegramWebhookSecret(token),
       }),
     });
     const data = await response.json().catch(() => ({}));
@@ -35,7 +38,7 @@ export default async function handler(req, res) {
       last_error_message: infoData.result?.last_error_message || null,
     } : null;
 
-    return res.status(200).json({ ok: true, url: SAFE_WEBHOOK_URL, info });
+    return res.status(200).json({ ok: true, url: SAFE_WEBHOOK_URL, secret_token_configured: true, info });
   } catch (error) {
     console.error('Webhook repair failed:', error?.message || error);
     return res.status(500).json({ ok: false, error: 'Webhook repair failed' });

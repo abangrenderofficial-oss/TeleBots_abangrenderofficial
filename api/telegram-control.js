@@ -1,3 +1,4 @@
+import { rejectUnauthorizedTelegramWebhook } from '../lib/bot/core/telegram-webhook-auth.js';
 import smartHandler from './telegram-smart.js';
 import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
 import { getProfileForItem, processMediaWithProfile } from '../lib/format-profiles.js';
@@ -19,6 +20,7 @@ const MAX_QUEUED_MEDIA = 120;
 const RESUME_MEDIA_LIMIT = 30;
 
 export default async function handler(req, res) {
+  if (req.method === 'POST' && rejectUnauthorizedTelegramWebhook(req, res)) return;
   if (req.method !== 'POST') return smartHandler(req, res);
 
   const update = req.body || {};

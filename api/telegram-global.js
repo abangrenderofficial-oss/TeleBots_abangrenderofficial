@@ -1,3 +1,4 @@
+import { rejectUnauthorizedTelegramWebhook } from '../lib/bot/core/telegram-webhook-auth.js';
 import commandHandler from './telegram-command.js';
 import { telegram, isAdminMessage } from '../lib/telegram.js';
 import {
@@ -18,6 +19,7 @@ const CAPTION_RECAP_ACTIVE_PREFIX = 'caption_recap_active:';
 const GLOBAL_PAUSE_PREFIX = 'global_paused:';
 
 export default async function handler(req, res) {
+  if (req.method === 'POST' && rejectUnauthorizedTelegramWebhook(req, res)) return;
   if (req.method !== 'POST') return commandHandler(req, res);
 
   const message = req.body?.message;

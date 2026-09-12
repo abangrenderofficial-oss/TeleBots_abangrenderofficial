@@ -1,3 +1,4 @@
+import { rejectUnauthorizedTelegramWebhook } from '../lib/bot/core/telegram-webhook-auth.js';
 import entryHandler from './telegram-entry.js';
 import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
 import {
@@ -21,6 +22,7 @@ const FAST_ENGINE = 'fast_recaption_v1';
 const AI_REFINE_CONCURRENCY = 3;
 
 export default async function handler(req, res) {
+  if (req.method === 'POST' && rejectUnauthorizedTelegramWebhook(req, res)) return;
   if (req.method !== 'POST') return entryHandler(req, res);
 
   const update = req.body || {};

@@ -1,3 +1,4 @@
+import { rejectUnauthorizedTelegramWebhook } from '../lib/bot/core/telegram-webhook-auth.js';
 import legacyHandler from './telegram.js';
 import { inspectIncomingDuplicate } from '../lib/duplicates.js';
 import { telegram, isAdminMessage, inlineKeyboard } from '../lib/telegram.js';
@@ -23,6 +24,7 @@ const DUP_SUMMARY_MERGE_MS = 15_000;
 const DUP_SCAN_WINDOW_MS = 2 * 60 * 1000;
 
 export default async function handler(req, res) {
+  if (req.method === 'POST' && rejectUnauthorizedTelegramWebhook(req, res)) return;
   if (req.method !== 'POST') return legacyHandler(req, res);
 
   const update = req.body || {};

@@ -16,6 +16,7 @@ jobs:
           SAFE="$BASE/api/telegram-safe-destination"
           REPAIR="$BASE/api/repair-webhook"
           ROUTER_MARKER='"router":"isolated-router-v1"'
+          EXPECTED_COMMIT="\"commit\":\"${GITHUB_SHA}\""
           EXPECTED='"url":"https://tele-bots-abangrenderofficial.vercel.app/api/telegram-safe-destination"'
 
           for i in {1..30}; do
@@ -24,14 +25,15 @@ jobs:
             cat /tmp/safe.txt || true
             echo
 
-            if [ "$safe_code" = "200" ] && grep -Fq "$ROUTER_MARKER" /tmp/safe.txt; then
+            if [ "$safe_code" = "200" ] && grep -Fq "$ROUTER_MARKER" /tmp/safe.txt && grep -Fq "$EXPECTED_COMMIT" /tmp/safe.txt; then
               echo "Isolated router is live. Repairing webhook..."
               repair_code=$(curl -sS -o /tmp/repair.txt -w "%{http_code}" -X POST "$REPAIR" || true)
               cat /tmp/repair.txt || true
               echo
 
-              if [ "$repair_code" = "200" ] && grep -Fq "$EXPECTED" /tmp/repair.txt; then
-                echo "Webhook confirmed on isolated /api/telegram-safe-destination"
+              unauth_code=$(curl -sS -o /tmp/unauth.txt -w "%{http_code}" -X POST -H "content-type: application/json" -d "{}" "$SAFE" || true)
+              if [ "$repair_code" = "200" ] && grep -Fq "$EXPECTED" /tmp/repair.txt && grep -Fq '"secret_token_configured":true' /tmp/repair.txt && [ "$unauth_code" = "401" ]; then
+                echo "Webhook confirmed on isolated /api/telegram-safe-destination with secret enforcement"
                 exit 0
               fi
             else
