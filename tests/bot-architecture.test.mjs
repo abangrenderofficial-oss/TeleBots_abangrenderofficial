@@ -93,3 +93,13 @@ test('live feature router does not import historical api/telegram monolith', asy
   assert.doesNotMatch(updateRouter, /api\/telegram|legacy-adapter/);
   assert.doesNotMatch(featureRouter, /api\/telegram|legacy-adapter/);
 });
+
+test('entire live isolated router graph imports successfully', async () => {
+  const update = await import('../lib/bot/update-router.js');
+  const safeEndpoint = await import('../api/telegram-safe-destination.js');
+  const compatibilityEndpoint = await import('../api/telegram.js');
+
+  assert.equal(typeof update.routeUpdate, 'function');
+  assert.equal(typeof safeEndpoint.default, 'function');
+  assert.equal(compatibilityEndpoint.default, safeEndpoint.default);
+});
