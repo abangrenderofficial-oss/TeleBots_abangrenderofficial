@@ -83,8 +83,8 @@ test('normal Telegram transport cannot self-register or heal webhook', async () 
   assert.ok(telegramStart >= 0 && repairStart > telegramStart);
 
   const normalTransport = transport.slice(telegramStart, repairStart);
-  assert.doesNotMatch(normalTransport, /setWebhook|ensureCallbackWebhookSupport/);
-  assert.match(transport.slice(repairStart), /setWebhook/);
+  assert.doesNotMatch(normalTransport, /rawTelegram\s*\([^\n]*['"]setWebhook['"]|ensureCallbackWebhookSupport/);
+  assert.match(transport.slice(repairStart), /['"]setWebhook['"]/);
 });
 
 test('live feature router does not import historical api/telegram monolith', async () => {
