@@ -94,10 +94,17 @@ test('format resume never revives historical pending rows before the paused uplo
     { id: 'old', admin_chat_id: '42', source_chat_id: '42', source_message_id: 90, status: 'PENDING', created_at: '2026-09-11T10:00:00Z' },
     { id: 'gate', admin_chat_id: '42', source_chat_id: '42', source_message_id: 100, status: 'READY', created_at: '2026-09-12T10:00:00Z' },
     { id: 'q1', admin_chat_id: '42', source_chat_id: '42', source_message_id: 101, status: 'PENDING', created_at: '2026-09-12T10:00:02Z' },
-    { id: 'q2', admin_chat_id: '42', source_chat_id: '42', source_message_id: 102, status: 'PENDING', created_at: '2026-09-12T10:00:03Z' },
+    { id: 'q2', admin_chat_id: '42', source_chat_id: '42', source_message_id: 102, status: 'FAILED', created_at: '2026-09-12T10:00:03Z' },
     { id: 'other-chat', admin_chat_id: '42', source_chat_id: '99', source_message_id: 103, status: 'PENDING', created_at: '2026-09-12T10:00:04Z' },
   ];
   assert.deepEqual(selectPausedQueueWindow(rows, review, 42).map((row) => row.id), ['q1', 'q2']);
+});
+
+test('ordered preview failure is isolated from caption resume processing', async () => {
+  const source = await readFile(new URL('../lib/bot/features/media.js', import.meta.url), 'utf8');
+  assert.match(source, /Ordered preview delivery failed:/);
+  assert.match(source, /Preview delivery failed:/);
+  assert.match(source, /Future flushes can retry this exact preview/);
 });
 
 test('media pipeline queues later uploads while format review is paused', async () => {
