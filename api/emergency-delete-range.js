@@ -22,8 +22,12 @@ async function telegram(token, method, payload) {
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
-  if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'POST only' });
-  if (String(req.headers['x-cleanup-key'] || '') !== CLEANUP_KEY) {
+  if (!['GET', 'POST'].includes(req.method)) return res.status(405).json({ ok: false, error: 'GET/POST only' });
+
+  const suppliedKey = req.method === 'GET'
+    ? String(req.query?.key || '')
+    : String(req.headers['x-cleanup-key'] || req.body?.key || '');
+  if (suppliedKey !== CLEANUP_KEY) {
     return res.status(403).json({ ok: false, error: 'forbidden' });
   }
 
@@ -47,8 +51,6 @@ export default async function handler(req, res) {
       });
       bulkDeleted += chunk.length;
     } catch (bulkError) {
-      // Fallback one-by-one so one undeletable/missing message cannot block
-      // the rest of the requested range.
       for (const messageId of chunk) {
         try {
           await telegram(token, 'deleteMessage', {
