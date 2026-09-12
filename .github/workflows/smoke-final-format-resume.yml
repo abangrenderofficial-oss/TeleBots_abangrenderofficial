@@ -8,26 +8,34 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger production /resume through Telegram webhook
+      - name: Double-confirm format then resume production queue
         shell: bash
         run: |
           set -euo pipefail
           URL="https://tele-bots-abangrenderofficial.vercel.app/api/telegram-safe-destination"
-          cat > /tmp/body.json <<'JSON'
-          {
-            "update_id": 990013,
-            "message": {
-              "message_id": 990013,
-              "from": {"id": 6749355196, "is_bot": false, "first_name": "Smoke"},
-              "chat": {"id": 6749355196, "type": "private"},
-              "date": 1789220013,
-              "text": "/resume",
-              "entities": [{"offset": 0, "length": 7, "type": "bot_command"}]
-            }
+
+          post_json() {
+            local name="$1"
+            local file="$2"
+            echo "--- $name ---"
+            code=$(curl --max-time 90 -sS -o "/tmp/${name}.json" -w "%{http_code}" -X POST "$URL" -H 'Content-Type: application/json' --data-binary "@$file")
+            cat "/tmp/${name}.json" || true
+            echo
+            test "$code" = "200"
+            grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "/tmp/${name}.json"
           }
+
+          cat > /tmp/confirm1.json <<'JSON'
+          {"update_id":991010,"callback_query":{"id":"REAL_CONFIRM_1_GHA","from":{"id":6749355196,"is_bot":false,"first_name":"Smoke"},"message":{"message_id":991010,"chat":{"id":6749355196,"type":"private"}},"data":"fmt_confirm:08653d62-7896-4903-8185-ce9e55bb6a26"}}
           JSON
-          code=$(curl -sS -o /tmp/response.json -w "%{http_code}" -X POST "$URL" -H 'Content-Type: application/json' --data-binary @/tmp/body.json)
-          cat /tmp/response.json
-          echo
-          test "$code" = "200"
-          grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' /tmp/response.json
+          post_json confirm1 /tmp/confirm1.json
+
+          cat > /tmp/confirm2.json <<'JSON'
+          {"update_id":991011,"callback_query":{"id":"REAL_CONFIRM_2_GHA","from":{"id":6749355196,"is_bot":false,"first_name":"Smoke"},"message":{"message_id":991011,"chat":{"id":6749355196,"type":"private"}},"data":"fmt_confirm:08653d62-7896-4903-8185-ce9e55bb6a26"}}
+          JSON
+          post_json confirm2 /tmp/confirm2.json
+
+          cat > /tmp/resume.json <<'JSON'
+          {"update_id":991012,"message":{"message_id":991012,"from":{"id":6749355196,"is_bot":false,"first_name":"Smoke"},"chat":{"id":6749355196,"type":"private"},"date":1789221012,"text":"/resume","entities":[{"offset":0,"length":7,"type":"bot_command"}]}}
+          JSON
+          post_json resume /tmp/resume.json
