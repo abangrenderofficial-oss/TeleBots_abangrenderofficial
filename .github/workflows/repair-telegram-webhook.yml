@@ -23,7 +23,7 @@ jobs:
               patch_code=$(curl -sS -o /tmp/patch.txt -w "%{http_code}" "$PATCH_URL" || true)
               cat /tmp/patch.txt || true
               echo
-              if [ "$patch_code" = "200" ]; then
+              if [ "$patch_code" = "200" ] && grep -q '"group_updated":true' /tmp/patch.txt; then
                 exit 0
               fi
             fi
