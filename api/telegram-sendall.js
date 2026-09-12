@@ -2,7 +2,6 @@ import { waitUntil } from '@vercel/functions';
 import { telegram } from '../lib/telegram.js';
 import { getQueueItem, getSetting, updateQueueItem } from '../lib/store.js';
 import {
-  claimNextBatchItem,
   completeBatchIfDone,
   getBatch,
   markBatchItemFailed,
@@ -12,14 +11,16 @@ import {
   recoverStaleClaims,
   requeueBatchItem,
 } from '../lib/explicit-batches.js';
+import { claimNextOrderedBatchItem } from '../lib/bot/batch/ordered-claim.js';
+import { copyWithTelegramRateLimitRetry } from '../lib/bot/batch/send-executor.js';
+import {
+  shouldContinueInvocation,
+  shouldKickNextWorker,
+} from '../lib/bot/batch/send-policy.js';
 
 // Always chain through the stable worker alias. Do not call an implementation
 // filename directly; this keeps every invocation on the same production route.
 const WORKER_URL = 'https://tele-bots-abangrenderofficial.vercel.app/api/send-batch-worker';
-
-// Small sequential chunks keep throughput decent while making /stop react fast.
-// Never parallel-copy multiple destination messages from one worker.
-const CHUNK_SIZE = 3;
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
@@ -44,15 +45,15 @@ export default async function handler(req, res) {
     });
   }
 
+  // Recover only genuinely abandoned claims. Healthy duplicate workers are
+  // blocked by the atomic ordered-claim RPC and cannot jump ahead.
   await recoverStaleClaims(batchId).catch(() => {});
 
+  const startedAt = Date.now();
   let processed = 0;
-  while (processed < CHUNK_SIZE) {
-    // Gate #1: before taking ownership of another item.
-    const beforeClaim = await readSendGate(batchId);
-    if (!beforeClaim.open) break;
 
-    const claim = await claimNextBatchItem(batchId);
+  while (shouldContinueInvocation({ processed, startedAt })) {
+    const claim = await claimNextOrderedBatchItem(batchId);
     if (!claim) break;
 
     const item = await getQueueItem(claim.item_id).catch(() => null);
@@ -63,7 +64,7 @@ export default async function handler(req, res) {
     }
 
     const status = String(item.status || '').toUpperCase();
-    const eligible = beforeClaim.batch.mode === 'resend'
+    const eligible = initialGate.batch.mode === 'resend'
       ? ['READY', 'FAILED', 'SENT'].includes(status)
       : ['READY', 'FAILED'].includes(status);
 
@@ -73,9 +74,8 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // Gate #2: this is intentionally immediately before copyMessage. /stop
-    // flips both the global pause and explicit batch status, so an invocation
-    // that was already alive cannot proceed to its NEXT Telegram send.
+    // Hard gate immediately before Telegram. /stop may arrive while an item is
+    // being prepared, but no NEXT copyMessage starts after this gate observes it.
     const finalGate = await readSendGate(batchId);
     if (!finalGate.open) {
       await requeueBatchItem(batchId, claim.position).catch(() => {});
@@ -95,11 +95,17 @@ export default async function handler(req, res) {
 
     let sent;
     try {
-      sent = await telegram('copyMessage', payload);
+      sent = await copyWithTelegramRateLimitRetry({
+        copy: (copyPayload) => telegram('copyMessage', copyPayload),
+        payload,
+        onWait: ({ retryAfterMs }) => {
+          console.warn(`Telegram rate limit. Waiting ${retryAfterMs}ms before ordered retry.`);
+        },
+      });
     } catch (error) {
       // Only a genuine Telegram-send failure becomes FAILED. Anything that
-      // happens AFTER Telegram returns success must never be treated as an
-      // unsent item, otherwise a retry could create another group message.
+      // happens AFTER Telegram returns success must never be treated as unsent,
+      // otherwise a retry could create another group message.
       await markBatchItemFailed(batchId, claim.position, error).catch(() => {});
       if (status !== 'SENT') {
         await updateQueueItem(item.id, {
@@ -140,8 +146,8 @@ export default async function handler(req, res) {
     }
 
     // Telegram has definitely accepted this NEW message. Persist its exact
-    // destination id through two independent batch records. Post-send DB
-    // trouble must never turn the item back into FAILED/PENDING.
+    // destination id through two independent batch records. Post-send DB trouble
+    // must never turn the item back into FAILED/PENDING.
     const [itemPersist, ledgerPersist] = await Promise.allSettled([
       retryMarkBatchItemSent(batchId, claim.position, destinationMessageId),
       recordBatchMessage({
@@ -188,8 +194,14 @@ export default async function handler(req, res) {
         ]],
       },
     }).catch(() => {});
-  } else if (latest?.status === 'RUNNING' && progress.pending > 0) {
-    // Exactly one small sequential continuation. No fan-out / parallel blast.
+  } else if (latest && shouldKickNextWorker({
+    status: latest.status,
+    pending: progress.pending,
+    sending: progress.sending,
+  })) {
+    // One continuation only after this invocation owns no in-flight claim.
+    // Duplicate workers that observe another SENDING item exit quietly instead
+    // of creating a worker fan-out loop.
     waitUntil(kickWorker(latest).catch((error) => {
       console.error('Next batch worker kick failed:', error?.message || error);
     }));
@@ -211,13 +223,12 @@ async function readSendGate(batchId) {
   const batch = await getBatch(batchId).catch(() => null);
   if (!batch) return { open: false, reason: 'missing_batch', batch: null };
   if (batch.status !== 'RUNNING') return { open: false, reason: 'batch_not_running', batch };
-  if (await isPaused(batch.admin_chat_id)) return { open: false, reason: 'global_pause', batch };
-  return { open: true, reason: null, batch };
-}
 
-async function isPaused(chatId) {
-  const value = await getSetting(`send_paused:${chatId}`).catch(() => null);
-  return Boolean(value === true || value?.paused);
+  const pauseValue = await getSetting(`send_paused:${batch.admin_chat_id}`).catch(() => null);
+  if (pauseValue === true || pauseValue?.paused) {
+    return { open: false, reason: 'global_pause', batch };
+  }
+  return { open: true, reason: null, batch };
 }
 
 async function retryMarkBatchItemSent(batchId, position, destinationMessageId) {
