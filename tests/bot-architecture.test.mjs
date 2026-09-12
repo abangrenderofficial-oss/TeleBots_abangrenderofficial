@@ -94,6 +94,14 @@ test('live feature router does not import historical api/telegram monolith', asy
   assert.doesNotMatch(featureRouter, /api\/telegram|legacy-adapter/);
 });
 
+test('reset confirmation clears pending state explicitly and ignores already processed ids', async () => {
+  const reset = await readFile(new URL('../lib/bot/batch/reset.js', import.meta.url), 'utf8');
+  assert.match(reset, /async function clearSetting\(/);
+  assert.match(reset, /filter\(\(id\) => !processedSet\.has\(id\)\)/);
+  assert.match(reset, /filter\(\(id\) => !set\.has\(id\)\)/);
+  assert.doesNotMatch(reset, /setSetting\(`reset_(?:exact|legacy)_pending:\$\{chatId\}`, null\)/);
+});
+
 test('entire live isolated router graph imports successfully', async () => {
   const update = await import('../lib/bot/update-router.js');
   const safeEndpoint = await import('../api/telegram-safe-destination.js');
