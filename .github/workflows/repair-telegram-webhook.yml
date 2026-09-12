@@ -8,26 +8,38 @@ jobs:
   repair:
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for Vercel production and repair webhook
+      - name: Wait for isolated Vercel production and repair webhook
         shell: bash
         run: |
           set -e
-          URL="https://tele-bots-abangrenderofficial.vercel.app/api/repair-webhook"
+          BASE="https://tele-bots-abangrenderofficial.vercel.app"
+          SAFE="$BASE/api/telegram-safe-destination"
+          REPAIR="$BASE/api/repair-webhook"
+          ROUTER_MARKER='"router":"isolated-router-v1"'
           EXPECTED='"url":"https://tele-bots-abangrenderofficial.vercel.app/api/telegram-safe-destination"'
 
-          for i in {1..18}; do
-            echo "Attempt $i"
-            code=$(curl -sS -o /tmp/body.txt -w "%{http_code}" -X POST "$URL" || true)
-            cat /tmp/body.txt || true
+          for i in {1..30}; do
+            echo "Attempt $i: verify isolated router"
+            safe_code=$(curl -sS -o /tmp/safe.txt -w "%{http_code}" "$SAFE" || true)
+            cat /tmp/safe.txt || true
             echo
 
-            if [ "$code" = "200" ] && grep -Fq "$EXPECTED" /tmp/body.txt; then
-              echo "Webhook confirmed on /api/telegram-safe-destination"
-              exit 0
+            if [ "$safe_code" = "200" ] && grep -Fq "$ROUTER_MARKER" /tmp/safe.txt; then
+              echo "Isolated router is live. Repairing webhook..."
+              repair_code=$(curl -sS -o /tmp/repair.txt -w "%{http_code}" -X POST "$REPAIR" || true)
+              cat /tmp/repair.txt || true
+              echo
+
+              if [ "$repair_code" = "200" ] && grep -Fq "$EXPECTED" /tmp/repair.txt; then
+                echo "Webhook confirmed on isolated /api/telegram-safe-destination"
+                exit 0
+              fi
+            else
+              echo "Production still serving an older router; not touching webhook yet."
             fi
 
             sleep 10
           done
 
-          echo "Webhook repair did not confirm safe destination endpoint in time"
+          echo "Isolated production/router was not confirmed in time"
           exit 1
