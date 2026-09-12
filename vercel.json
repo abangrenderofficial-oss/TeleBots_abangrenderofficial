@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/telegram",
-      "destination": "/api/telegram-safety"
+      "destination": "/api/telegram-safe-destination"
     }
   ]
 }
