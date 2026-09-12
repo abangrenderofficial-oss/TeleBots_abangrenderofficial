@@ -2,7 +2,11 @@
   "rewrites": [
     {
       "source": "/api/telegram",
-      "destination": "/api/telegram-safe-v2"
+      "destination": "/api/telegram-safe-destination"
+    },
+    {
+      "source": "/api/send-batch-worker",
+      "destination": "/api/telegram-sendall"
     }
   ]
 }
