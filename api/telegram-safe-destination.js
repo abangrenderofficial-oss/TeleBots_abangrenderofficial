@@ -27,6 +27,10 @@ export default async function handler(req, res) {
     const data = String(query.data || '');
 
     if (data === 'hard_resume') return resumeFromButton(chatId, query, req, res);
+    if (data === 'resetbatch_prepare') {
+      await telegram('answerCallbackQuery', { callback_query_id: query.id }).catch(() => {});
+      return prepareResetBatch(chatId, res);
+    }
     if (data === 'resetbatch_confirm') return confirmResetBatch(chatId, query, res);
     if (data === 'resetbatch_cancel') return cancelResetBatch(chatId, query, res);
   }
@@ -104,7 +108,7 @@ async function hardStop(chatId, res) {
     reply_markup: {
       inline_keyboard: [[
         { text: '▶️ RESUME', callback_data: 'hard_resume' },
-        { text: '🗑 RESET BATCH', callback_data: 'resetbatch_confirm' },
+        { text: '🗑 RESET BATCH', callback_data: 'resetbatch_prepare' },
       ]],
     },
   });
