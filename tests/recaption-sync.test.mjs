@@ -5,6 +5,7 @@ import {
   canSyncSentItem,
   normalizeSentSyncMode,
   shouldAutoSync,
+  syncSentItemById,
 } from '../lib/bot/features/sent-sync.js';
 import {
   compareRecaptionResult,
@@ -132,4 +133,38 @@ test('/resetbatch exact mode uses ledger plus sent-item ids and is idempotent', 
   assert.match(reset, /filter\(\(id\) => !processedSet\.has\(id\)\)/);
   assert.match(reset, /already_processed: true/);
   assert.doesNotMatch(reset, /destination_message_id\s*>=|message_id\s*>=/);
+});
+
+test('AUTO repairs an older Telegram edit that completes after the newest caption', async () => {
+  let currentCaption = '<b>First</b>';
+  const sent = [];
+  let releaseFirst;
+  let firstStarted;
+  const firstStartedPromise = new Promise((resolve) => { firstStarted = resolve; });
+  const firstReleasePromise = new Promise((resolve) => { releaseFirst = resolve; });
+  const getItemFn = async () => ({
+    id: 'item-1',
+    status: 'SENT',
+    destination_chat_id: '-100123',
+    destination_message_id: 456,
+    final_caption_html: currentCaption,
+  });
+  const telegramFn = async (_method, payload) => {
+    if (payload.caption === '<b>First</b>') {
+      firstStarted();
+      await firstReleasePromise;
+    }
+    sent.push(payload.caption);
+  };
+  const persistFn = async () => null;
+  const options = { mode: 'auto', getItemFn, telegramFn, persistFn };
+
+  const first = syncSentItemById('item-1', options);
+  await firstStartedPromise;
+  currentCaption = '<b>Latest</b>';
+  const second = syncSentItemById('item-1', options);
+  assert.equal((await second).ok, true);
+  releaseFirst();
+  assert.equal((await first).ok, true);
+  assert.deepEqual(sent, ['<b>Latest</b>', '<b>First</b>', '<b>Latest</b>']);
 });
