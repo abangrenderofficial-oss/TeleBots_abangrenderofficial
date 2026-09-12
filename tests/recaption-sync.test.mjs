@@ -11,6 +11,7 @@ import {
   validateProcessedAgainstProfile,
 } from '../lib/bot/features/recaption.js';
 import { formatConfirmLabel } from '../lib/bot/features/format-gate.js';
+import { selectPausedQueueWindow } from '../lib/bot/features/format-resume.js';
 
 test('sent edit sync supports both tested policies but defaults safely to button', () => {
   assert.equal(normalizeSentSyncMode(null), 'button');
@@ -82,20 +83,36 @@ test('new format requires two explicit confirmations and still requires /resume'
   assert.equal(formatConfirmLabel(base, 'OTHER'), null);
 });
 
+test('format resume never revives historical pending rows before the paused upload window', () => {
+  const review = {
+    queue_source_chat_id: '42',
+    queue_start_source_message_id: 100,
+    queue_start_created_at: '2026-09-12T10:00:00.000Z',
+    created_at: '2026-09-12T10:00:01.000Z',
+  };
+  const rows = [
+    { id: 'old', admin_chat_id: '42', source_chat_id: '42', source_message_id: 90, status: 'PENDING', created_at: '2026-09-11T10:00:00Z' },
+    { id: 'gate', admin_chat_id: '42', source_chat_id: '42', source_message_id: 100, status: 'READY', created_at: '2026-09-12T10:00:00Z' },
+    { id: 'q1', admin_chat_id: '42', source_chat_id: '42', source_message_id: 101, status: 'PENDING', created_at: '2026-09-12T10:00:02Z' },
+    { id: 'q2', admin_chat_id: '42', source_chat_id: '42', source_message_id: 102, status: 'PENDING', created_at: '2026-09-12T10:00:03Z' },
+    { id: 'other-chat', admin_chat_id: '42', source_chat_id: '99', source_message_id: 103, status: 'PENDING', created_at: '2026-09-12T10:00:04Z' },
+  ];
+  assert.deepEqual(selectPausedQueueWindow(rows, review, 42).map((row) => row.id), ['q1', 'q2']);
+});
+
 test('media pipeline queues later uploads while format review is paused', async () => {
   const source = await readFile(new URL('../lib/bot/features/media.js', import.meta.url), 'utf8');
   assert.match(source, /isFormatPipelinePaused\(message\.chat\.id\)/);
   assert.match(source, /status: 'PENDING'/);
   assert.match(source, /pauseForNewFormat/);
-  assert.match(source, /resumePendingMedia/);
   assert.match(source, /format_profile_confirmed:/);
 });
 
-test('/resume cannot bypass unconfirmed format and drains caption queue first', async () => {
+test('/resume cannot bypass unconfirmed format and drains scoped caption queue first', async () => {
   const command = await readFile(new URL('../lib/bot/commands/resume.js', import.meta.url), 'utf8');
   const control = await readFile(new URL('../lib/bot/batch/control.js', import.meta.url), 'utf8');
   assert.match(command, /blocked: 'format_not_confirmed'/);
-  assert.ok(command.indexOf('resumePendingMedia') < command.lastIndexOf('resumeLatest'));
+  assert.ok(command.indexOf('resumeFormatQueue') < command.lastIndexOf('resumeLatest'));
   assert.match(control, /format_review_gate:/);
   assert.match(control, /format_queue_pending/);
 });
