@@ -1,5 +1,6 @@
 import controlHandler from './telegram-control.js';
 import { telegram, isAdminMessage } from '../lib/telegram.js';
+import { getQueueItem, getSetting, setSetting } from '../lib/store.js';
 
 const COMMAND_TEXT = [
   '📋 COMMAND ABANGRENDER.CO BOT',
@@ -45,6 +46,8 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return controlHandler(req, res);
 
   const message = req.body?.message;
+  const query = req.body?.callback_query;
+
   if (
     message?.chat?.type === 'private'
     && isAdminMessage(message)
@@ -58,5 +61,98 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, command_list: true });
   }
 
-  return controlHandler(req, res);
+  // Reliability fix for previews created BEFORE LIVE GROUP SYNC existed.
+  // Their old ✏️ button still contains edit:<itemId>, so when the owner taps it
+  // we immediately force the destination message to match the CURRENT caption
+  // stored in DB. This repairs stale group captions even when the DB caption had
+  // already been corrected earlier (meaning before/after comparison sees no new
+  // change and the newer safety layer would otherwise skip the sync).
+  let forcedItem = null;
+  let forcedChatId = null;
+  if (query?.message && isAdminMessage({ from: query.from })) {
+    const data = String(query.data || '');
+    const [action, id] = data.split(':');
+    if (id && (action === 'edit' || action === 'back')) {
+      forcedItem = await getQueueItem(id).catch(() => null);
+      forcedChatId = query.message.chat.id;
+    }
+  }
+
+  const shadow = createShadowResponse();
+  await controlHandler(req, shadow);
+
+  if (forcedItem?.id && forcedChatId != null) {
+    const latest = await getQueueItem(forcedItem.id).catch(() => forcedItem);
+    if (isSentWithDestination(latest)) {
+      await forceCurrentCaptionToGroup(latest, forcedChatId).catch(() => {});
+    }
+  }
+
+  return res.status(shadow.statusCode || 200).json(shadow.body || { ok: true });
+}
+
+function isSentWithDestination(item) {
+  return Boolean(
+    item?.id
+    && String(item.status || '').toUpperCase() === 'SENT'
+    && item.destination_chat_id
+    && item.destination_message_id
+  );
+}
+
+async function forceCurrentCaptionToGroup(item, adminChatId) {
+  try {
+    await telegram('editMessageCaption', {
+      chat_id: item.destination_chat_id,
+      message_id: item.destination_message_id,
+      caption: item.final_caption_html || '',
+      parse_mode: 'HTML',
+    });
+    await setSetting(`sent_live_sync:${item.id}`, {
+      ok: true,
+      source: 'old_preview_edit_force_sync',
+      destination_chat_id: String(item.destination_chat_id),
+      destination_message_id: item.destination_message_id,
+      synced_at: new Date().toISOString(),
+    }).catch(() => {});
+  } catch (error) {
+    const text = String(error?.message || error);
+    if (/message is not modified/i.test(text)) {
+      await setSetting(`sent_live_sync:${item.id}`, {
+        ok: true,
+        source: 'old_preview_already_current',
+        destination_chat_id: String(item.destination_chat_id),
+        destination_message_id: item.destination_message_id,
+        synced_at: new Date().toISOString(),
+      }).catch(() => {});
+      return;
+    }
+
+    await setSetting(`sent_live_sync:${item.id}`, {
+      ok: false,
+      source: 'old_preview_edit_force_sync',
+      error: text.slice(0, 500),
+      failed_at: new Date().toISOString(),
+    }).catch(() => {});
+
+    await telegram('sendMessage', {
+      chat_id: adminChatId,
+      text: `⚠️ LIVE GROUP SYNC gagal untuk item ni. ${text}`.slice(0, 1000),
+    }).catch(() => {});
+  }
+}
+
+function createShadowResponse() {
+  return {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return body;
+    },
+  };
 }
