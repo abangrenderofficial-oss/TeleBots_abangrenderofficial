@@ -12,9 +12,8 @@ import {
   requeueBatchItem,
 } from '../lib/explicit-batches.js';
 import { claimNextOrderedBatchItem } from '../lib/bot/batch/ordered-claim.js';
+import { copyWithTelegramRateLimitRetry } from '../lib/bot/batch/send-executor.js';
 import {
-  MAX_RATE_LIMIT_RETRIES,
-  parseTelegramRetryAfterMs,
   shouldContinueInvocation,
   shouldKickNextWorker,
 } from '../lib/bot/batch/send-policy.js';
@@ -96,7 +95,13 @@ export default async function handler(req, res) {
 
     let sent;
     try {
-      sent = await copyWithTelegramRateLimitRetry(payload);
+      sent = await copyWithTelegramRateLimitRetry({
+        copy: (copyPayload) => telegram('copyMessage', copyPayload),
+        payload,
+        onWait: ({ retryAfterMs }) => {
+          console.warn(`Telegram rate limit. Waiting ${retryAfterMs}ms before ordered retry.`);
+        },
+      });
     } catch (error) {
       // Only a genuine Telegram-send failure becomes FAILED. Anything that
       // happens AFTER Telegram returns success must never be treated as unsent,
@@ -224,25 +229,6 @@ async function readSendGate(batchId) {
     return { open: false, reason: 'global_pause', batch };
   }
   return { open: true, reason: null, batch };
-}
-
-async function copyWithTelegramRateLimitRetry(payload) {
-  let lastError = null;
-
-  for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
-    try {
-      return await telegram('copyMessage', payload);
-    } catch (error) {
-      lastError = error;
-      const retryAfterMs = parseTelegramRetryAfterMs(error);
-      if (retryAfterMs == null || attempt >= MAX_RATE_LIMIT_RETRIES) throw error;
-
-      console.warn(`Telegram rate limit. Waiting ${retryAfterMs}ms before ordered retry.`);
-      await sleep(retryAfterMs);
-    }
-  }
-
-  throw lastError || new Error('Telegram copy failed');
 }
 
 async function retryMarkBatchItemSent(batchId, position, destinationMessageId) {
