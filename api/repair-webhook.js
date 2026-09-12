@@ -1,4 +1,4 @@
-const SAFE_WEBHOOK_URL = 'https://tele-bots-abangrenderofficial.vercel.app/api/telegram-safe-destination';
+const SAFE_WEBHOOK_URL = 'https://tele-bots-abangrenderofficial.vercel.app/api/telegram-safe-v2';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
