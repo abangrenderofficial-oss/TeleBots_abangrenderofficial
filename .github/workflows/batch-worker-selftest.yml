@@ -1,0 +1,27 @@
+name: Batch Worker Self Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/batch-worker-selftest.yml'
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for production deploy
+        run: sleep 20
+      - name: Exercise batch worker without a real Telegram destination
+        shell: bash
+        run: |
+          set -e
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w "%{http_code}" \
+            -X POST 'https://tele-bots-abangrenderofficial.vercel.app/api/send-batch-worker' \
+            -H 'content-type: application/json' \
+            --data '{"batch_id":"TEST_BATCH_E2E_20260912_1","worker_secret":"test_only_worker_secret_20260912"}')
+          cat "$body"
+          echo
+          echo "HTTP $code"
+          test "$code" = "200"
