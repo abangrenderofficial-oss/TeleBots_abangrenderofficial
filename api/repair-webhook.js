@@ -1,6 +1,4 @@
 const SAFE_WEBHOOK_URL = 'https://tele-bots-abangrenderofficial.vercel.app/api/telegram-safe-destination';
-const SMOKE_CHAT_ID = '-5438007168';
-const SMOKE_MESSAGE_IDS = [2005, 2006, 2007];
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -37,23 +35,7 @@ export default async function handler(req, res) {
       last_error_message: infoData.result?.last_error_message || null,
     } : null;
 
-    const cleanupResponse = await fetch(`https://api.telegram.org/bot${token}/deleteMessages`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: SMOKE_CHAT_ID,
-        message_ids: SMOKE_MESSAGE_IDS,
-      }),
-    });
-    const cleanupData = await cleanupResponse.json().catch(() => ({}));
-    const smoke_cleanup = {
-      ok: Boolean(cleanupResponse.ok && cleanupData.ok && cleanupData.result === true),
-      description: cleanupData.description || null,
-      chat_id: SMOKE_CHAT_ID,
-      message_ids: SMOKE_MESSAGE_IDS,
-    };
-
-    return res.status(200).json({ ok: true, url: SAFE_WEBHOOK_URL, info, smoke_cleanup });
+    return res.status(200).json({ ok: true, url: SAFE_WEBHOOK_URL, info });
   } catch (error) {
     console.error('Webhook repair failed:', error?.message || error);
     return res.status(500).json({ ok: false, error: 'Webhook repair failed' });
