@@ -1,0 +1,31 @@
+name: Menu Live Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/menu-live-test.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Vercel production
+        run: sleep 15
+      - name: Repair webhook and exercise menu handler
+        shell: bash
+        run: |
+          set -e
+          base='https://tele-bots-abangrenderofficial.vercel.app'
+          curl -fsS -X POST "$base/api/repair-webhook"
+          echo
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w "%{http_code}" \
+            -X POST "$base/api/telegram" \
+            -H 'content-type: application/json' \
+            --data '{"update_id":999999991,"message":{"message_id":999999991,"from":{"id":6749355196,"is_bot":false,"first_name":"Admin"},"chat":{"id":6749355196,"type":"private"},"date":1789194000,"text":"/menu"}}')
+          cat "$body"
+          echo
+          echo "HTTP $code"
+          test "$code" = "200"
+          grep -Fq '"menu":true' "$body"
