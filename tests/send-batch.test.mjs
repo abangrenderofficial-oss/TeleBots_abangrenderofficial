@@ -9,6 +9,7 @@ import {
 } from '../lib/bot/batch/send-policy.js';
 import { claimNextOrderedBatchItem } from '../lib/bot/batch/ordered-claim.js';
 import { copyWithTelegramRateLimitRetry } from '../lib/bot/batch/send-executor.js';
+import { selectResendBatchWindow } from '../lib/send-control.js';
 
 test('worker policy sends larger sequential chunks without unlimited invocation loops', () => {
   assert.equal(MAX_ITEMS_PER_INVOCATION, 12);
@@ -111,6 +112,42 @@ test('ordered claim migration serializes by batch and blocks jumping past SENDIN
   assert.match(sql, /status in \('PENDING', 'SENDING'\)/);
   assert.match(sql, /order by position asc/);
   assert.match(sql, /v_row\.status <> 'PENDING'/);
+});
+
+test('old preview resend starts from the exact clicked anchor and stops at the upload-session gap', () => {
+  const anchor = {
+    id: 'i379', admin_chat_id: '6749355196', source_chat_id: '6749355196',
+    source_message_id: 379, created_at: '2026-09-11T14:56:04.968Z', status: 'SENT',
+  };
+  const rows = [
+    anchor,
+    { id: 'i380', admin_chat_id: '6749355196', source_chat_id: '6749355196', source_message_id: 380, created_at: '2026-09-11T14:56:22.921Z', status: 'SENT' },
+    { id: 'i381', admin_chat_id: '6749355196', source_chat_id: '6749355196', source_message_id: 381, created_at: '2026-09-11T14:56:29.765Z', status: 'SENT' },
+    { id: 'i382', admin_chat_id: '6749355196', source_chat_id: '6749355196', source_message_id: 382, created_at: '2026-09-11T14:56:47.783Z', status: 'SENT' },
+    { id: 'i383', admin_chat_id: '6749355196', source_chat_id: '6749355196', source_message_id: 383, created_at: '2026-09-11T14:56:56.167Z', status: 'SENT' },
+    { id: 'i384', admin_chat_id: '6749355196', source_chat_id: '6749355196', source_message_id: 384, created_at: '2026-09-11T14:57:05.723Z', status: 'SENT' },
+    { id: 'i429', admin_chat_id: '6749355196', source_chat_id: '6749355196', source_message_id: 429, created_at: '2026-09-11T15:23:47.136Z', status: 'READY' },
+  ];
+
+  assert.deepEqual(selectResendBatchWindow(rows, anchor).map((row) => row.source_message_id), [379, 380, 381, 382, 383, 384]);
+});
+
+test('old preview resend fails closed if the exact clicked anchor is absent', () => {
+  const anchor = { id: 'old-anchor', admin_chat_id: '1', source_chat_id: '1', source_message_id: 100, created_at: '2026-09-11T10:00:00Z', status: 'SENT' };
+  const rows = [
+    { id: 'later', admin_chat_id: '1', source_chat_id: '1', source_message_id: 101, created_at: '2026-09-11T10:00:10Z', status: 'SENT' },
+  ];
+  assert.deepEqual(selectResendBatchWindow(rows, anchor), []);
+});
+
+test('old preview resend cannot duplicate one Telegram source message', () => {
+  const anchor = { id: 'a', admin_chat_id: '1', source_chat_id: '1', source_message_id: 10, created_at: '2026-09-11T10:00:00Z', status: 'SENT' };
+  const rows = [
+    anchor,
+    { id: 'dup-a', admin_chat_id: '1', source_chat_id: '1', source_message_id: 10, created_at: '2026-09-11T10:00:01Z', status: 'SENT' },
+    { id: 'b', admin_chat_id: '1', source_chat_id: '1', source_message_id: 11, created_at: '2026-09-11T10:00:05Z', status: 'SENT' },
+  ];
+  assert.deepEqual(selectResendBatchWindow(rows, anchor).map((row) => row.id), ['a', 'b']);
 });
 
 test('worker uses ordered claims and tested rate-limit retry executor', async () => {
