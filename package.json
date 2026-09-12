@@ -7,7 +7,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "vercel dev"
+    "dev": "vercel dev",
+    "test": "node --test"
   },
   "dependencies": {
     "@vercel/functions": "3.9.7"
