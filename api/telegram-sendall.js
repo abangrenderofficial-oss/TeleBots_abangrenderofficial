@@ -13,7 +13,12 @@ import {
   requeueBatchItem,
 } from '../lib/explicit-batches.js';
 
-const WORKER_URL = 'https://tele-bots-abangrenderofficial.vercel.app/api/telegram-sendall';
+// Always chain through the stable worker alias. Do not call an implementation
+// filename directly; this keeps every invocation on the same production route.
+const WORKER_URL = 'https://tele-bots-abangrenderofficial.vercel.app/api/send-batch-worker';
+
+// Small sequential chunks keep throughput decent while making /stop react fast.
+// Never parallel-copy multiple destination messages from one worker.
 const CHUNK_SIZE = 3;
 
 export default async function handler(req, res) {
@@ -24,25 +29,28 @@ export default async function handler(req, res) {
   const secret = String(req.body?.worker_secret || '');
   if (!batchId || !secret) return res.status(400).json({ ok: false, error: 'missing batch credentials' });
 
-  const batch = await getBatch(batchId).catch(() => null);
+  const initialGate = await readSendGate(batchId);
+  const batch = initialGate.batch;
   if (!batch || String(batch.worker_secret || '') !== secret) {
     return res.status(403).json({ ok: false, error: 'invalid batch credentials' });
   }
 
-  if (batch.status !== 'RUNNING') {
-    return res.status(200).json({ ok: true, stopped: true, status: batch.status });
-  }
-
-  if (await isPaused(batch.admin_chat_id)) {
-    return res.status(200).json({ ok: true, paused: true });
+  if (!initialGate.open) {
+    return res.status(200).json({
+      ok: true,
+      stopped: initialGate.reason === 'batch_not_running',
+      paused: initialGate.reason === 'global_pause',
+      status: batch.status,
+    });
   }
 
   await recoverStaleClaims(batchId).catch(() => {});
 
   let processed = 0;
   while (processed < CHUNK_SIZE) {
-    const current = await getBatch(batchId).catch(() => null);
-    if (!current || current.status !== 'RUNNING' || await isPaused(current.admin_chat_id)) break;
+    // Gate #1: before taking ownership of another item.
+    const beforeClaim = await readSendGate(batchId);
+    if (!beforeClaim.open) break;
 
     const claim = await claimNextBatchItem(batchId);
     if (!claim) break;
@@ -55,7 +63,7 @@ export default async function handler(req, res) {
     }
 
     const status = String(item.status || '').toUpperCase();
-    const eligible = current.mode === 'resend'
+    const eligible = beforeClaim.batch.mode === 'resend'
       ? ['READY', 'FAILED', 'SENT'].includes(status)
       : ['READY', 'FAILED'].includes(status);
 
@@ -65,68 +73,33 @@ export default async function handler(req, res) {
       continue;
     }
 
-    // HARD GATE immediately before Telegram. /stop only needs to flip the DB
-    // state; any already-running worker is blocked before its next copyMessage.
-    const gateBatch = await getBatch(batchId).catch(() => null);
-    if (!gateBatch || gateBatch.status !== 'RUNNING' || await isPaused(gateBatch.admin_chat_id)) {
+    // Gate #2: this is intentionally immediately before copyMessage. /stop
+    // flips both the global pause and explicit batch status, so an invocation
+    // that was already alive cannot proceed to its NEXT Telegram send.
+    const finalGate = await readSendGate(batchId);
+    if (!finalGate.open) {
       await requeueBatchItem(batchId, claim.position).catch(() => {});
       break;
     }
 
+    const activeBatch = finalGate.batch;
+    const forceResend = activeBatch.mode === 'resend' && status === 'SENT';
+    const payload = {
+      chat_id: activeBatch.destination_chat_id,
+      from_chat_id: item.source_chat_id,
+      message_id: item.source_message_id,
+      parse_mode: 'HTML',
+      caption: item.final_caption_html || '',
+    };
+    if (forceResend) payload.__force_resend = true;
+
+    let sent;
     try {
-      const forceResend = current.mode === 'resend' && status === 'SENT';
-      const payload = {
-        chat_id: current.destination_chat_id,
-        from_chat_id: item.source_chat_id,
-        message_id: item.source_message_id,
-        parse_mode: 'HTML',
-        caption: item.final_caption_html || '',
-      };
-      if (forceResend) payload.__force_resend = true;
-
-      const sent = await telegram('copyMessage', payload);
-      const destinationMessageId = Number(sent?.message_id);
-      if (!Number.isInteger(destinationMessageId) || destinationMessageId <= 0) {
-        throw new Error('Telegram returned invalid destination message ID');
-      }
-
-      // If Telegram's old exact-occurrence dedupe says this message already
-      // existed BEFORE this explicit batch, do not attach that older group
-      // message to the new batch. Otherwise RESET THIS BATCH could delete a
-      // message belonging to a previous batch.
-      if (sent?.__deduped) {
-        await markBatchItemSkipped(batchId, claim.position, 'Already sent before this explicit batch');
-        await updateQueueItem(item.id, {
-          status: 'SENT',
-          destination_chat_id: String(current.destination_chat_id),
-          destination_message_id: destinationMessageId,
-          error_message: null,
-        }).catch(() => {});
-        processed += 1;
-        continue;
-      }
-
-      await markBatchItemSent(batchId, claim.position, destinationMessageId);
-
-      await recordBatchMessage({
-        batchId,
-        item,
-        destinationChatId: current.destination_chat_id,
-        destinationMessageId,
-      }).catch((error) => {
-        console.error('Batch ledger insert failed after Telegram send:', error?.message || error);
-      });
-
-      await updateQueueItem(item.id, {
-        status: 'SENT',
-        destination_chat_id: String(current.destination_chat_id),
-        destination_message_id: destinationMessageId,
-        sent_at: new Date().toISOString(),
-        error_message: null,
-      }).catch((error) => {
-        console.error('Queue SENT update failed:', error?.message || error);
-      });
+      sent = await telegram('copyMessage', payload);
     } catch (error) {
+      // Only a genuine Telegram-send failure becomes FAILED. Anything that
+      // happens AFTER Telegram returns success must never be treated as an
+      // unsent item, otherwise a retry could create another group message.
       await markBatchItemFailed(batchId, claim.position, error).catch(() => {});
       if (status !== 'SENT') {
         await updateQueueItem(item.id, {
@@ -134,7 +107,69 @@ export default async function handler(req, res) {
           error_message: String(error?.message || error).slice(0, 1000),
         }).catch(() => {});
       }
+      processed += 1;
+      continue;
     }
+
+    const destinationMessageId = Number(sent?.message_id);
+    if (!Number.isInteger(destinationMessageId) || destinationMessageId <= 0) {
+      // Telegram claimed success but did not provide a usable message id. Do
+      // not auto-retry this item: the external send outcome is ambiguous.
+      await markBatchItemSkipped(batchId, claim.position, 'Telegram success without valid destination message ID').catch(() => {});
+      await updateQueueItem(item.id, {
+        status: 'SENT',
+        destination_chat_id: String(activeBatch.destination_chat_id),
+        error_message: 'Telegram success without valid destination message ID; manual review required',
+      }).catch(() => {});
+      processed += 1;
+      continue;
+    }
+
+    // If Telegram's exact-occurrence dedupe says this message existed BEFORE
+    // this explicit batch, never attach that older group message to this batch.
+    if (sent?.__deduped) {
+      await markBatchItemSkipped(batchId, claim.position, 'Already sent before this explicit batch').catch(() => {});
+      await updateQueueItem(item.id, {
+        status: 'SENT',
+        destination_chat_id: String(activeBatch.destination_chat_id),
+        destination_message_id: destinationMessageId,
+        error_message: null,
+      }).catch(() => {});
+      processed += 1;
+      continue;
+    }
+
+    // Telegram has definitely accepted this NEW message. Persist its exact
+    // destination id through two independent batch records. Post-send DB
+    // trouble must never turn the item back into FAILED/PENDING.
+    const [itemPersist, ledgerPersist] = await Promise.allSettled([
+      retryMarkBatchItemSent(batchId, claim.position, destinationMessageId),
+      recordBatchMessage({
+        batchId,
+        item,
+        destinationChatId: activeBatch.destination_chat_id,
+        destinationMessageId,
+      }),
+    ]);
+
+    if (itemPersist.status === 'rejected') {
+      console.error('Batch SENT item persistence failed after Telegram success:', itemPersist.reason?.message || itemPersist.reason);
+    }
+    if (ledgerPersist.status === 'rejected') {
+      console.error('Batch ledger persistence failed after Telegram success:', ledgerPersist.reason?.message || ledgerPersist.reason);
+    }
+
+    await updateQueueItem(item.id, {
+      status: 'SENT',
+      destination_chat_id: String(activeBatch.destination_chat_id),
+      destination_message_id: destinationMessageId,
+      sent_at: new Date().toISOString(),
+      error_message: (itemPersist.status === 'rejected' && ledgerPersist.status === 'rejected')
+        ? 'Sent to Telegram but batch tracking persistence failed; manual review required'
+        : null,
+    }).catch((error) => {
+      console.error('Queue SENT update failed after Telegram success:', error?.message || error);
+    });
 
     processed += 1;
   }
@@ -154,6 +189,7 @@ export default async function handler(req, res) {
       },
     }).catch(() => {});
   } else if (latest?.status === 'RUNNING' && progress.pending > 0) {
+    // Exactly one small sequential continuation. No fan-out / parallel blast.
     waitUntil(kickWorker(latest).catch((error) => {
       console.error('Next batch worker kick failed:', error?.message || error);
     }));
@@ -171,9 +207,36 @@ export default async function handler(req, res) {
   });
 }
 
+async function readSendGate(batchId) {
+  const batch = await getBatch(batchId).catch(() => null);
+  if (!batch) return { open: false, reason: 'missing_batch', batch: null };
+  if (batch.status !== 'RUNNING') return { open: false, reason: 'batch_not_running', batch };
+  if (await isPaused(batch.admin_chat_id)) return { open: false, reason: 'global_pause', batch };
+  return { open: true, reason: null, batch };
+}
+
 async function isPaused(chatId) {
   const value = await getSetting(`send_paused:${chatId}`).catch(() => null);
   return Boolean(value === true || value?.paused);
+}
+
+async function retryMarkBatchItemSent(batchId, position, destinationMessageId) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const row = await markBatchItemSent(batchId, position, destinationMessageId);
+      if (row) return row;
+      throw new Error('markBatchItemSent returned no row');
+    } catch (error) {
+      lastError = error;
+      await sleep(100 * (attempt + 1));
+    }
+  }
+  throw lastError || new Error('Unable to persist SENT batch item');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function kickWorker(batch) {
