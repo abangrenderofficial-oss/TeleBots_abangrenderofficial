@@ -40,6 +40,25 @@ declare
 begin
   perform pg_advisory_xact_lock(hashtextextended('recaption:' || p_admin_chat_id::text, 0));
 
+  -- Telegram can replay one webhook. Never create the same queue occurrence
+  -- twice just because the webhook was delivered again.
+  select * into v_item
+  from public.queue_items
+  where admin_chat_id = p_admin_chat_id
+    and source_chat_id = p_source_chat_id
+    and source_message_id = p_source_message_id
+  order by created_at desc
+  limit 1;
+
+  if v_item.id is not null then
+    return jsonb_build_object(
+      'replay', true,
+      'session_id', v_item.recaption_session_id,
+      'session_count', null,
+      'item', to_jsonb(v_item)
+    );
+  end if;
+
   select * into v_session
   from public.recaption_sessions
   where admin_chat_id = p_admin_chat_id
@@ -90,6 +109,7 @@ begin
   returning * into v_session;
 
   return jsonb_build_object(
+    'replay', false,
     'session_id', v_session.id,
     'session_count', v_session.item_count,
     'item', to_jsonb(v_item)
