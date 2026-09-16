@@ -7,11 +7,15 @@ create table if not exists public.recaption_sessions (
   status text not null default 'COLLECTING'
     check (status in ('COLLECTING', 'PROCESSING', 'PAUSED', 'COMPLETED', 'FAILED')),
   item_count integer not null default 0,
+  worker_secret text,
   created_at timestamptz not null default now(),
   closed_at timestamptz,
   completed_at timestamptz,
   updated_at timestamptz not null default now()
 );
+
+alter table public.recaption_sessions
+  add column if not exists worker_secret text;
 
 create unique index if not exists recaption_sessions_one_collecting_per_admin
   on public.recaption_sessions (admin_chat_id)
@@ -142,6 +146,7 @@ begin
 
   update public.recaption_sessions
   set status = 'PROCESSING',
+      worker_secret = coalesce(worker_secret, gen_random_uuid()::text),
       closed_at = now(),
       updated_at = now()
   where id = v_session.id
