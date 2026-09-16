@@ -5,6 +5,7 @@ import { isForwardedMessage } from '../lib/bot/features/recaption-collection.js'
 import {
   RECAPTION_MAX_ITEMS_PER_INVOCATION,
   RECAPTION_MAX_WORK_MS,
+  shouldPersistRecaptionPause,
 } from '../lib/bot/features/recaption-runner.js';
 
 test('forward detector supports current and legacy Telegram forwarding fields', () => {
@@ -54,6 +55,11 @@ test('duplicate recaption workers are serialized by an expiring lease', async ()
   assert.match(runner, /claimRecaptionWorker/);
   assert.match(runner, /finally \{/);
   assert.match(runner, /releaseRecaptionWorker/);
+});
+
+test('fast /resume cannot be overwritten by the old pausing worker', () => {
+  assert.equal(shouldPersistRecaptionPause({ reviewStillActive: true }), true);
+  assert.equal(shouldPersistRecaptionPause({ reviewStillActive: false }), false);
 });
 
 test('new-format pause remembers recaption session and /resume returns to same worker', async () => {
