@@ -44,6 +44,18 @@ test('manual recaption worker is bounded and exact-session scoped', async () => 
   assert.match(runner, /should_continue: true/);
 });
 
+test('duplicate recaption workers are serialized by an expiring lease', async () => {
+  const sql = await readFile(new URL('../supabase/migrations/20260916170000_manual_recaption_collection.sql', import.meta.url), 'utf8');
+  const runner = await readFile(new URL('../lib/bot/features/recaption-runner.js', import.meta.url), 'utf8');
+  assert.match(sql, /claim_recaption_worker/);
+  assert.match(sql, /worker_lease_until > now\(\)/);
+  assert.match(sql, /'busy'/);
+  assert.match(sql, /release_recaption_worker/);
+  assert.match(runner, /claimRecaptionWorker/);
+  assert.match(runner, /finally \{/);
+  assert.match(runner, /releaseRecaptionWorker/);
+});
+
 test('new-format pause remembers recaption session and /resume returns to same worker', async () => {
   const gate = await readFile(new URL('../lib/bot/features/format-gate.js', import.meta.url), 'utf8');
   const resume = await readFile(new URL('../lib/bot/commands/resume.js', import.meta.url), 'utf8');
