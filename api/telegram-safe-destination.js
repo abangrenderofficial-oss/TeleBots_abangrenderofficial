@@ -1,7 +1,7 @@
 import { routeUpdate } from '../lib/bot/update-router.js';
 import { rejectUnauthorizedTelegramWebhook } from '../lib/bot/core/telegram-webhook-auth.js';
 
-const BUILD_MARKER = 'recaption-sync-format-gate-auth-v3';
+const BUILD_MARKER = 'manual-recaption-trigger-v1';
 
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
