@@ -1,10 +1,4 @@
-import { runManualVisionRepair } from '../lib/manual-vision-repair.js';
-
 export default async function handler(req, res) {
-  if (String(req.query?.repair_vision || '') === '1') {
-    return runManualVisionRepair(req, res);
-  }
-
   return res.status(200).json({
     ok: true,
     service: 'telebots-abangrenderofficial',
