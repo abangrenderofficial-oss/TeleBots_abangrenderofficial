@@ -7,6 +7,7 @@ import {
   RECAPTION_MAX_WORK_MS,
   shouldPersistRecaptionPause,
 } from '../lib/bot/features/recaption-runner.js';
+import { validateProcessedAgainstProfile } from '../lib/bot/features/recaption.js';
 
 test('forward detector supports current and legacy Telegram forwarding fields', () => {
   assert.equal(isForwardedMessage({ forward_origin: { type: 'channel' } }), true);
@@ -79,4 +80,50 @@ test('collection migration is atomic, replay-safe and rotates before recaption',
   assert.match(sql, /'replay', true/);
   assert.match(sql, /set status = 'PROCESSING'/i);
   assert.match(sql, /worker_secret = coalesce\(worker_secret, gen_random_uuid\(\)::text\)/);
+});
+
+test('Translate ON fails validation while source-script text remains', () => {
+  const profile = {
+    footer_html: null,
+    actions: {
+      take_title: true,
+      take_serial: false,
+      translate: true,
+      remove_hashtags: true,
+      add_footer: false,
+    },
+  };
+  const bad = validateProcessedAgainstProfile({
+    title: 'Kettler Astro-Эллиптический тренажер',
+    finalCaptionHtml: '<b>Kettler Astro-Эллиптический тренажер</b>',
+  }, profile, {});
+  assert.equal(bad.ok, false);
+  assert.match(bad.errors.join(' '), /translation still contains non-Latin source text/);
+
+  const good = validateProcessedAgainstProfile({
+    title: 'Kettler Astro Elliptical Trainer',
+    finalCaptionHtml: '<b>Kettler Astro Elliptical Trainer</b>',
+  }, profile, {});
+  assert.equal(good.ok, true);
+});
+
+test('known translated formats are finalized through the failover recaption path', async () => {
+  const runner = await readFile(new URL('../lib/bot/features/recaption-runner.js', import.meta.url), 'utf8');
+  assert.match(runner, /finalizeTranslatedRecaptionItem/);
+  assert.match(runner, /recaption_final_translation_validation/);
+  assert.match(runner, /status: 'FAILED'/);
+});
+
+test('format manager can reapply a format to the latest unsent recaption batch', async () => {
+  const manager = await readFile(new URL('../lib/bot/features/format-manager.js', import.meta.url), 'utf8');
+  const callbacks = await readFile(new URL('../lib/bot/features/preview-callbacks.js', import.meta.url), 'utf8');
+  const worker = await readFile(new URL('../lib/bot/features/format-batch-apply.js', import.meta.url), 'utf8');
+  const apiWorker = await readFile(new URL('../api/recaption-worker.js', import.meta.url), 'utf8');
+
+  assert.match(manager, /APPLY CURRENT BATCH/);
+  assert.match(callbacks, /fmtmgr_applybatch/);
+  assert.match(worker, /\['PENDING', 'READY', 'FAILED'\]/);
+  assert.match(worker, /\['SENT', 'SKIPPED'\]\.includes/);
+  assert.match(worker, /syncSent: false/);
+  assert.match(apiWorker, /mode.*apply_profile/);
 });
