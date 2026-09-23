@@ -114,11 +114,15 @@ test('known translated formats are finalized through the failover recaption path
   assert.match(runner, /status: 'FAILED'/);
 });
 
-test('invalid translated recaption cannot be manually sent while FAILED', async () => {
+test('invalid translated recaption cannot escape through single send or SEND ALL', async () => {
   const sendOne = await readFile(new URL('../lib/bot/features/send-one.js', import.meta.url), 'utf8');
+  const sendAll = await readFile(new URL('../api/telegram-sendall.js', import.meta.url), 'utf8');
   assert.match(sendOne, /send_item_blocked_invalid_translation/);
   assert.match(sendOne, /blocked: 'invalid_translation'/);
   assert.match(sendOne, /translation unavailable\|translate failed\|translation still contains non-latin\|recaption validation failed/i);
+  assert.match(sendAll, /isInvalidTranslationFailure/);
+  assert.match(sendAll, /Blocked: recaption translation\/validation is not valid yet/);
+  assert.match(sendAll, /markBatchItemSkipped/);
 });
 
 test('format manager can reapply a format to the latest unsent recaption batch', async () => {
