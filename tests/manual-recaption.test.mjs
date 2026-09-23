@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { isForwardedMessage } from '../lib/bot/features/recaption-collection.js';
 import {
+  RECAPTION_CONCURRENCY,
   RECAPTION_MAX_ITEMS_PER_INVOCATION,
   RECAPTION_MAX_WORK_MS,
   shouldPersistRecaptionPause,
@@ -35,14 +36,22 @@ test('/recaption is a registered explicit command', async () => {
   assert.match(command, /nothing_collected/);
 });
 
-test('manual recaption worker is bounded and exact-session scoped', async () => {
+test('manual recaption worker is bounded, three-way concurrent and exact-session scoped', async () => {
   assert.equal(RECAPTION_MAX_ITEMS_PER_INVOCATION, 8);
   assert.equal(RECAPTION_MAX_WORK_MS, 12_000);
+  assert.equal(RECAPTION_CONCURRENCY, 3);
   const collection = await readFile(new URL('../lib/bot/features/recaption-collection.js', import.meta.url), 'utf8');
   const runner = await readFile(new URL('../lib/bot/features/recaption-runner.js', import.meta.url), 'utf8');
+  const media = await readFile(new URL('../lib/bot/features/media.js', import.meta.url), 'utf8');
   assert.match(collection, /recaption_session_id=eq\./);
   assert.match(collection, /order=source_message_id\.asc,created_at\.asc/);
   assert.match(runner, /listRecaptionSessionItems\(session\.admin_chat_id, session\.id, \['PENDING'\]/);
+  assert.match(runner, /Promise\.all\(wave\.map/);
+  assert.match(runner, /takeNextRecaptionWave/);
+  assert.match(runner, /RECAPTION_CONCURRENCY = 3/);
+  assert.match(runner, /hard boundary/);
+  assert.match(media, /sort\(\(a, b\) =>/);
+  assert.match(media, /if \(String\(row\.status \|\| ''\)\.toUpperCase\(\) === 'PENDING'\) break/);
   assert.match(runner, /should_continue: true/);
 });
 
