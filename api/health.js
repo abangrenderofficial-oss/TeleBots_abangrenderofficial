@@ -1,9 +1,3 @@
-import { getProfileForItem } from '../lib/format-profiles.js';
-import {
-  getLatestRecaptionSession,
-  listRecaptionSessionItems,
-} from '../lib/bot/features/recaption-collection.js';
-import { recaptionItemWithProfile } from '../lib/bot/features/recaption.js';
 import { probeTranslationFailover } from '../lib/translation-failover.js';
 
 const PROBE_TOKEN = 'ar260924p7';
@@ -20,119 +14,52 @@ export default async function handler(req, res) {
       output: probe.output || null,
       attempts: probe.attempts || null,
       error: probe.error || null,
-      configured: {
-        openrouter: Boolean(process.env.OPENROUTER_API_KEY),
-        groq: Boolean(process.env.GROQ_API_KEY),
-        together: Boolean(process.env.TOGETHER_API_KEY),
-        mistral: Boolean(process.env.MISTRAL_API_KEY),
-        deepseek: Boolean(process.env.DEEPSEEK_API_KEY),
-        cerebras: Boolean(process.env.CEREBRAS_API_KEY),
-        sambanova: Boolean(process.env.SAMBANOVA_API_KEY),
-        upstage: Boolean(process.env.UPSTAGE_API_KEY),
-        minimax: Boolean(process.env.MINIMAX_API_KEY),
-        gemini1: Boolean(process.env.GEMINI_API_KEY),
-        gemini2: Boolean(process.env.GEMINI_API_KEY_2),
-        gemini3: Boolean(process.env.GEMINI_API_KEY_3),
-      },
+      configured: providerConfiguration(),
     });
   }
 
   if (req.query?.batch_scan === '1' && authorizedProbe) {
-    const loaded = await loadLatestBatch();
-    if (!loaded.session) return res.status(404).json({ ok: false, error: 'no recaption session' });
-    return res.status(200).json({
-      ok: true,
-      session: compactSession(loaded.session),
-      item_count: loaded.items.length,
-      untranslated_count: loaded.items.filter(isLikelyUntranslated).length,
-      items: loaded.items.map((item) => ({
-        id: item.id,
-        source_message_id: item.source_message_id,
-        status: item.status,
-        serial: detectSerial(item),
-        title: String(item.generated_title || '').slice(0, 180),
-        has_non_latin_title: hasNonLatin(item.generated_title),
-        likely_untranslated: isLikelyUntranslated(item),
-      })),
-    });
-  }
-
-  if (req.query?.batch_repair === '1' && authorizedProbe) {
-    const loaded = await loadLatestBatch();
-    if (!loaded.session) return res.status(404).json({ ok: false, error: 'no recaption session' });
-
-    const startMessageId = Number(req.query?.start_source_message_id || 0);
-    const afterMessageId = Number(req.query?.after_source_message_id || 0);
-    const limit = Math.min(Math.max(Number(req.query?.limit || 1), 1), 2);
-    const includeSent = req.query?.include_sent === '1';
-    const allowedStatuses = includeSent
-      ? new Set(['PENDING', 'READY', 'FAILED', 'SENT'])
-      : new Set(['PENDING', 'READY', 'FAILED']);
-
-    let candidates = loaded.items.filter((item) => allowedStatuses.has(String(item.status || '').toUpperCase()));
-    if (startMessageId) candidates = candidates.filter((item) => Number(item.source_message_id || 0) >= startMessageId);
-    if (afterMessageId) candidates = candidates.filter((item) => Number(item.source_message_id || 0) > afterMessageId);
-    candidates = candidates.filter(isLikelyUntranslated);
-
-    const selected = candidates.slice(0, limit);
-    const results = [];
-    for (const item of selected) {
-      try {
-        const profile = await getProfileForItem(item);
-        if (!profile) throw new Error('format profile missing');
-        const forced = {
-          ...profile,
-          actions: {
-            ...(profile.actions || {}),
-            take_title: true,
-            translate: true,
-          },
-        };
-        const result = await recaptionItemWithProfile(item.id, forced, {
-          reason: 'manual_latest_batch_translation_repair',
-          syncSent: includeSent,
-        });
-        results.push({
+    try {
+      const loaded = await loadLatestBatchDirect();
+      if (!loaded.session) return res.status(404).json({ ok: false, error: 'no recaption session' });
+      return res.status(200).json({
+        ok: true,
+        session: compactSession(loaded.session),
+        item_count: loaded.items.length,
+        untranslated_count: loaded.items.filter(isLikelyUntranslated).length,
+        items: loaded.items.map((item) => ({
           id: item.id,
           source_message_id: item.source_message_id,
+          status: item.status,
           serial: detectSerial(item),
-          ok: true,
-          before: String(item.generated_title || '').slice(0, 180),
-          after: String(result?.processed?.title || '').slice(0, 180),
-        });
-      } catch (error) {
-        results.push({
-          id: item.id,
-          source_message_id: item.source_message_id,
-          serial: detectSerial(item),
-          ok: false,
-          error: String(error?.message || error).slice(0, 600),
-        });
-      }
+          title: String(item.generated_title || '').slice(0, 180),
+          has_non_latin_title: hasNonLatin(item.generated_title),
+          likely_untranslated: isLikelyUntranslated(item),
+        })),
+      });
+    } catch (error) {
+      return res.status(500).json({
+        ok: false,
+        error: String(error?.message || error).slice(0, 1000),
+        configured: {
+          admin: Boolean(process.env.ADMIN_TELEGRAM_ID),
+          supabase_url: Boolean(process.env.SUPABASE_URL),
+          supabase_service_role: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+        },
+      });
     }
-
-    const lastProcessed = results.length ? Number(results[results.length - 1].source_message_id || 0) : afterMessageId;
-    return res.status(200).json({
-      ok: results.every((x) => x.ok),
-      session: compactSession(loaded.session),
-      start_source_message_id: startMessageId || null,
-      processed: results.length,
-      results,
-      next_after_source_message_id: lastProcessed || null,
-      remaining_candidates_before_refresh: Math.max(0, candidates.length - selected.length),
-    });
   }
 
-  res.status(200).json({
+  return res.status(200).json({
     ok: true,
     service: 'telebots-abangrenderofficial',
     build: 'format-learning-v1-kl-chat',
     telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
     adminConfigured: Boolean(process.env.ADMIN_TELEGRAM_ID),
     supabaseConfigured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
-    aiConfigured: Boolean(process.env.GEMINI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY),
+    aiConfigured: Boolean(process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_2 || process.env.GEMINI_API_KEY_3 || process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY),
     setupSecretConfigured: Boolean(process.env.SETUP_SECRET),
-    aiProvider: process.env.OPENROUTER_API_KEY ? 'multi-provider' : (process.env.GEMINI_API_KEY ? 'gemini' : null),
+    aiProvider: process.env.OPENROUTER_API_KEY ? 'multi-provider' : ((process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_2 || process.env.GEMINI_API_KEY_3) ? 'gemini' : null),
     aiModel: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
     agentModel: process.env.GEMINI_AGENT_MODEL || 'gemini-2.5-flash-lite',
     agentArchitecture: 'dynamic-toolbox-v1',
@@ -142,13 +69,48 @@ export default async function handler(req, res) {
   });
 }
 
-async function loadLatestBatch() {
+function providerConfiguration() {
+  return {
+    openrouter: Boolean(process.env.OPENROUTER_API_KEY),
+    groq: Boolean(process.env.GROQ_API_KEY),
+    together: Boolean(process.env.TOGETHER_API_KEY),
+    mistral: Boolean(process.env.MISTRAL_API_KEY),
+    deepseek: Boolean(process.env.DEEPSEEK_API_KEY),
+    cerebras: Boolean(process.env.CEREBRAS_API_KEY),
+    sambanova: Boolean(process.env.SAMBANOVA_API_KEY),
+    upstage: Boolean(process.env.UPSTAGE_API_KEY),
+    minimax: Boolean(process.env.MINIMAX_API_KEY),
+    gemini1: Boolean(process.env.GEMINI_API_KEY),
+    gemini2: Boolean(process.env.GEMINI_API_KEY_2),
+    gemini3: Boolean(process.env.GEMINI_API_KEY_3),
+  };
+}
+
+async function loadLatestBatchDirect() {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   const chatId = Number(process.env.ADMIN_TELEGRAM_ID || 0);
-  if (!chatId) throw new Error('ADMIN_TELEGRAM_ID missing');
-  const session = await getLatestRecaptionSession(chatId, ['COLLECTING', 'PROCESSING', 'PAUSED', 'COMPLETED', 'FAILED']);
+  if (!url || !key) throw new Error('Supabase env missing in this deployment');
+  if (!chatId) throw new Error('ADMIN_TELEGRAM_ID missing in this deployment');
+
+  const headers = { apikey: key, authorization: `Bearer ${key}` };
+  const sessionResponse = await fetch(
+    `${url}/rest/v1/recaption_sessions?admin_chat_id=eq.${encodeURIComponent(chatId)}&order=created_at.desc&limit=1&select=*`,
+    { headers },
+  );
+  const sessionText = await sessionResponse.text();
+  if (!sessionResponse.ok) throw new Error(`session fetch ${sessionResponse.status}: ${sessionText.slice(0, 500)}`);
+  const sessions = sessionText ? JSON.parse(sessionText) : [];
+  const session = sessions?.[0] || null;
   if (!session) return { session: null, items: [] };
-  const items = await listRecaptionSessionItems(chatId, session.id, [], 1000);
-  return { session, items };
+
+  const itemsResponse = await fetch(
+    `${url}/rest/v1/queue_items?admin_chat_id=eq.${encodeURIComponent(chatId)}&recaption_session_id=eq.${encodeURIComponent(session.id)}&order=source_message_id.asc,created_at.asc&limit=1000&select=*`,
+    { headers },
+  );
+  const itemsText = await itemsResponse.text();
+  if (!itemsResponse.ok) throw new Error(`items fetch ${itemsResponse.status}: ${itemsText.slice(0, 500)}`);
+  return { session, items: itemsText ? JSON.parse(itemsText) : [] };
 }
 
 function compactSession(session) {
@@ -163,8 +125,7 @@ function compactSession(session) {
 
 function isLikelyUntranslated(item) {
   const title = String(item?.generated_title || '').trim();
-  if (!title) return false;
-  return hasNonLatin(title);
+  return Boolean(title && hasNonLatin(title));
 }
 
 function hasNonLatin(value) {
