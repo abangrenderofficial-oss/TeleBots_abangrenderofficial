@@ -4,8 +4,8 @@ import {
   runFormatBatchApplyJob,
 } from '../lib/bot/features/format-batch-apply.js';
 import {
-  kickImmediateMediaWorker,
   runImmediateMediaQueue,
+  scheduleImmediateMediaContinuation,
 } from '../lib/bot/features/immediate-media-worker.js';
 import {
   kickRecaptionWorker,
@@ -29,8 +29,8 @@ export default async function handler(req, res) {
     if (result.status_code === 403) return res.status(403).json(result);
 
     if (result.should_continue) {
-      waitUntil(kickImmediateMediaWorker(chatId).catch((error) => {
-        console.error('Immediate media continuation kick failed:', error?.message || error);
+      waitUntil(scheduleImmediateMediaContinuation(chatId, workerSecret).catch((error) => {
+        console.error('Immediate media continuation schedule failed:', error?.message || error);
       }));
     }
 
