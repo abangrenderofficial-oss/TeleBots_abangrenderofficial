@@ -40,14 +40,17 @@ test('serial validation rejects a title that still contains the canonical serial
   assert.match(result.errors.join(' '), /canonical serial appears more than once/);
 });
 
-test('direct media worker finalizes through strict recaption translation and DB scheduled continuation', async () => {
+test('direct media prepares strictly before the atomic ordered sender and DB scheduled continuation', async () => {
   const worker = await readFile(new URL('../lib/bot/features/immediate-media-worker.js', import.meta.url), 'utf8');
   const apiWorker = await readFile(new URL('../api/recaption-worker.js', import.meta.url), 'utf8');
-  const migration = await readFile(new URL('../supabase/migrations/20260924222000_schedule_immediate_media_worker.sql', import.meta.url), 'utf8');
+  const migration = await readFile(new URL('../supabase/migrations/20260924231000_prepared_preview_sender.sql', import.meta.url), 'utf8');
 
   assert.match(worker, /recaptionItemWithProfile/);
-  assert.match(worker, /immediate_media_final_validation/);
+  assert.match(worker, /reason: 'immediate_prepare'/);
+  assert.match(worker, /forceTranslateAllLanguages: true/);
+  assert.match(worker, /keepPending: true/);
   assert.match(worker, /status: 'FAILED'/);
+  assert.match(worker, /claim_queue_preview_send/);
   assert.match(worker, /schedule_immediate_media_worker/);
   assert.match(apiWorker, /scheduleImmediateMediaContinuation/);
   assert.doesNotMatch(apiWorker, /Immediate media continuation kick failed/);
