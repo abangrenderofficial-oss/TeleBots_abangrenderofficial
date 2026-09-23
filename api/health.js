@@ -22,13 +22,17 @@ export default async function handler(req, res) {
   if (req.query?.batch_scan === '1' && authorizedProbe) {
     try {
       const loaded = await loadLatestBatchDirect();
+      const afterMessageId = Number(req.query?.after_source_message_id || 0);
+      const items = afterMessageId
+        ? loaded.items.filter((item) => Number(item.source_message_id || 0) >= afterMessageId)
+        : loaded.items;
       return res.status(200).json({
         ok: true,
         source: loaded.session ? 'recaption_session' : 'recent_queue_fallback',
         session: loaded.session ? compactSession(loaded.session) : null,
-        item_count: loaded.items.length,
-        untranslated_count: loaded.items.filter(isLikelyUntranslated).length,
-        items: loaded.items.map((item) => ({
+        item_count: items.length,
+        untranslated_count: items.filter(isLikelyUntranslated).length,
+        items: items.map((item) => ({
           id: item.id,
           source_message_id: item.source_message_id,
           status: item.status,
@@ -52,15 +56,21 @@ export default async function handler(req, res) {
       if (!item) return res.status(404).json({ ok: false, error: 'queue item not found' });
       const before = String(item.generated_title || '').trim();
       if (!before) return res.status(400).json({ ok: false, error: 'item has no generated title' });
-      if (!hasNonLatin(before)) return res.status(200).json({ ok: true, skipped: 'already_latin', source_message_id: sourceMessageId, title: before });
 
       const lines = before.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
       const first = lines[0] || '';
       const serial = looksLikeSerial(first) ? first : '';
       const core = serial ? lines.slice(1).join('\n').trim() : before;
-      if (!core) return res.status(400).json({ ok: false, error: 'no translatable title text' });
+      const manualCore = String(req.query?.manual_core || '').trim();
 
-      const translated = await translateTitleFailover(core);
+      if (!manualCore && !hasNonLatin(before)) {
+        return res.status(200).json({ ok: true, skipped: 'already_latin', source_message_id: sourceMessageId, title: before });
+      }
+      if (!core && !manualCore) return res.status(400).json({ ok: false, error: 'no translatable title text' });
+
+      const translated = manualCore
+        ? { text: manualCore, provider: 'manual_verified', model: null }
+        : await translateTitleFailover(core);
       if (!translated.text || hasNonLatin(translated.text)) {
         throw new Error('provider returned untranslated/non-Latin output');
       }
@@ -162,7 +172,6 @@ async function loadLatestBatchDirect() {
   if (!sessionResponse.ok) throw new Error(`session fetch ${sessionResponse.status}: ${sessionText.slice(0, 500)}`);
   const sessions = sessionText ? JSON.parse(sessionText) : [];
   const session = sessions?.[0] || null;
-
   const itemsUrl = session
     ? `${url}/rest/v1/queue_items?admin_chat_id=eq.${encodeURIComponent(chatId)}&recaption_session_id=eq.${encodeURIComponent(session.id)}&order=source_message_id.asc,created_at.asc&limit=1000&select=*`
     : `${url}/rest/v1/queue_items?admin_chat_id=eq.${encodeURIComponent(chatId)}&order=created_at.desc&limit=250&select=*`;
