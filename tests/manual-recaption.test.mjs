@@ -23,7 +23,7 @@ test('forwarded media is collected before existing immediate recaption path', as
   assert.match(source, /if \(isForwardedMessage\(message\)\)/);
   assert.match(source, /collectForwardedQueueItem/);
   assert.match(source, /aku belum recaption apa-apa/);
-  assert.ok(source.indexOf('isForwardedMessage(message)') < source.lastIndexOf('prepareMedia(message)'));
+  assert.ok(source.indexOf('isForwardedMessage(message)') < source.lastIndexOf('enqueueImmediateMedia(message)'));
 });
 
 test('/recaption is a registered explicit command', async () => {
