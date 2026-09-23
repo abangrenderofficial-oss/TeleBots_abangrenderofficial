@@ -21,10 +21,10 @@ export default async function handler(req, res) {
   if (req.query?.batch_scan === '1' && authorizedProbe) {
     try {
       const loaded = await loadLatestBatchDirect();
-      if (!loaded.session) return res.status(404).json({ ok: false, error: 'no recaption session' });
       return res.status(200).json({
         ok: true,
-        session: compactSession(loaded.session),
+        source: loaded.session ? 'recaption_session' : 'recent_queue_fallback',
+        session: loaded.session ? compactSession(loaded.session) : null,
         item_count: loaded.items.length,
         untranslated_count: loaded.items.filter(isLikelyUntranslated).length,
         items: loaded.items.map((item) => ({
@@ -33,7 +33,8 @@ export default async function handler(req, res) {
           status: item.status,
           serial: detectSerial(item),
           title: String(item.generated_title || '').slice(0, 180),
-          has_non_latin_title: hasNonLatin(item.generated_title),
+          created_at: item.created_at,
+          recaption_session_id: item.recaption_session_id || null,
           likely_untranslated: isLikelyUntranslated(item),
         })),
       });
@@ -102,15 +103,20 @@ async function loadLatestBatchDirect() {
   if (!sessionResponse.ok) throw new Error(`session fetch ${sessionResponse.status}: ${sessionText.slice(0, 500)}`);
   const sessions = sessionText ? JSON.parse(sessionText) : [];
   const session = sessions?.[0] || null;
-  if (!session) return { session: null, items: [] };
 
-  const itemsResponse = await fetch(
-    `${url}/rest/v1/queue_items?admin_chat_id=eq.${encodeURIComponent(chatId)}&recaption_session_id=eq.${encodeURIComponent(session.id)}&order=source_message_id.asc,created_at.asc&limit=1000&select=*`,
-    { headers },
-  );
+  let itemsUrl;
+  if (session) {
+    itemsUrl = `${url}/rest/v1/queue_items?admin_chat_id=eq.${encodeURIComponent(chatId)}&recaption_session_id=eq.${encodeURIComponent(session.id)}&order=source_message_id.asc,created_at.asc&limit=1000&select=*`;
+  } else {
+    itemsUrl = `${url}/rest/v1/queue_items?admin_chat_id=eq.${encodeURIComponent(chatId)}&order=created_at.desc&limit=250&select=*`;
+  }
+
+  const itemsResponse = await fetch(itemsUrl, { headers });
   const itemsText = await itemsResponse.text();
   if (!itemsResponse.ok) throw new Error(`items fetch ${itemsResponse.status}: ${itemsText.slice(0, 500)}`);
-  return { session, items: itemsText ? JSON.parse(itemsText) : [] };
+  const raw = itemsText ? JSON.parse(itemsText) : [];
+  const items = session ? raw : [...raw].sort((a, b) => Number(a.source_message_id || 0) - Number(b.source_message_id || 0));
+  return { session, items };
 }
 
 function compactSession(session) {
