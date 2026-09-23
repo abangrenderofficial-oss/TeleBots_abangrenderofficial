@@ -4,12 +4,14 @@ import { readFile, access } from 'node:fs/promises';
 import { parseCommand } from '../lib/bot/core/command.js';
 import { registeredCommandNames } from '../lib/bot/commands/router.js';
 import { classifyBatchCallback } from '../lib/bot/batch/router.js';
+import { formatManagerOptionFromAction } from '../lib/bot/features/format-manager.js';
 
 const expectedCommands = [
   'aitest',
   'clearchat',
   'connect',
   'forget',
+  'formats',
   'help',
   'memories',
   'menu',
@@ -50,7 +52,7 @@ test('each command domain has its own owner module', async () => {
   const files = [
     'menu.js', 'help.js', 'whoami.js', 'version.js', 'aitest.js', 'stats.js',
     'total.js', 'pending.js', 'memories.js', 'remember.js', 'forget.js',
-    'clearchat.js', 'setcaption.js', 'stop.js', 'resume.js', 'resetbatch.js',
+    'clearchat.js', 'setcaption.js', 'formats.js', 'stop.js', 'resume.js', 'resetbatch.js',
     'recaption.js', 'connect.js',
   ];
   await Promise.all(files.map((file) => access(new URL(`../lib/bot/commands/${file}`, import.meta.url))));
@@ -65,6 +67,16 @@ test('batch callback router owns only batch callbacks', () => {
   assert.equal(classifyBatchCallback('send:item-7'), null);
   assert.equal(classifyBatchCallback('edit:item-7'), null);
   assert.equal(classifyBatchCallback('fmt_title:item-7'), null);
+  assert.equal(classifyBatchCallback('fmtmgr_open:fmt-1'), null);
+});
+
+test('format manager maps only supported profile toggles', () => {
+  assert.equal(formatManagerOptionFromAction('fmtmgr_title'), 'take_title');
+  assert.equal(formatManagerOptionFromAction('fmtmgr_serial'), 'take_serial');
+  assert.equal(formatManagerOptionFromAction('fmtmgr_translate'), 'translate');
+  assert.equal(formatManagerOptionFromAction('fmtmgr_hashtags'), 'remove_hashtags');
+  assert.equal(formatManagerOptionFromAction('fmtmgr_footer'), 'add_footer');
+  assert.equal(formatManagerOptionFromAction('fmtmgr_open'), null);
 });
 
 test('production ingress is thin and legacy /api/telegram is only an alias', async () => {
