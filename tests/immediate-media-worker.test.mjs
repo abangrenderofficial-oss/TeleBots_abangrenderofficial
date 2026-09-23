@@ -30,7 +30,7 @@ test('existing recaption endpoint hosts immediate media mode without a new serve
   const api = await readFile(new URL('../api/recaption-worker.js', import.meta.url), 'utf8');
   assert.match(api, /mode === 'immediate_media'/);
   assert.match(api, /runImmediateMediaQueue/);
-  assert.match(api, /kickImmediateMediaWorker/);
+  assert.match(api, /scheduleImmediateMediaContinuation/);
 });
 
 test('/resume returns confirmed direct-upload queues to the three-way worker', async () => {
