@@ -52,7 +52,7 @@ test('direct queue keeps ten prep workers behind one revision-safe sender', asyn
   assert.match(worker, /allowAiBypass/);
 });
 
-test('format edits invalidate old prepared revisions', async () => {
+test('format edits invalidate prepared items and in-flight prep keeps its start revision', async () => {
   const [callbacks, stateInput, controller] = await Promise.all([
     source('lib/bot/features/preview-callbacks.js'),
     source('lib/bot/features/state-input.js'),
@@ -63,7 +63,10 @@ test('format edits invalidate old prepared revisions', async () => {
   assert.match(stateInput, /markFormatProfileChanged/);
   assert.match(controller, /format_profile_revision_v1:/);
   assert.match(controller, /invalidatePreparedItemsForProfile/);
+  assert.match(controller, /immediate_prep_revision_v1:/);
   assert.match(controller, /immediate_prepared_revision_v1:/);
+  assert.match(controller, /snapshot the profile revision at prep START/i);
+  assert.match(controller, /snapshotRevision/);
 });
 
 test('direct AI continue is scoped to only the blocked item', async () => {
