@@ -74,6 +74,16 @@ export default async function handler(req, res) {
       continue;
     }
 
+    if (status === 'FAILED' && isInvalidTranslationFailure(item.error_message)) {
+      await markBatchItemSkipped(
+        batchId,
+        claim.position,
+        'Blocked: recaption translation/validation is not valid yet',
+      ).catch(() => {});
+      processed += 1;
+      continue;
+    }
+
     // Hard gate immediately before Telegram. /stop may arrive while an item is
     // being prepared, but no NEXT copyMessage starts after this gate observes it.
     const finalGate = await readSendGate(batchId);
@@ -229,6 +239,10 @@ async function readSendGate(batchId) {
     return { open: false, reason: 'global_pause', batch };
   }
   return { open: true, reason: null, batch };
+}
+
+function isInvalidTranslationFailure(value) {
+  return /translation unavailable|translate failed|translation still contains non-latin|recaption validation failed/i.test(String(value || ''));
 }
 
 async function retryMarkBatchItemSent(batchId, position, destinationMessageId) {
