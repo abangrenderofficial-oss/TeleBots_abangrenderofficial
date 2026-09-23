@@ -114,6 +114,13 @@ test('known translated formats are finalized through the failover recaption path
   assert.match(runner, /status: 'FAILED'/);
 });
 
+test('invalid translated recaption cannot be manually sent while FAILED', async () => {
+  const sendOne = await readFile(new URL('../lib/bot/features/send-one.js', import.meta.url), 'utf8');
+  assert.match(sendOne, /send_item_blocked_invalid_translation/);
+  assert.match(sendOne, /blocked: 'invalid_translation'/);
+  assert.match(sendOne, /translation unavailable\|translate failed\|translation still contains non-latin\|recaption validation failed/i);
+});
+
 test('format manager can reapply a format to the latest unsent recaption batch', async () => {
   const manager = await readFile(new URL('../lib/bot/features/format-manager.js', import.meta.url), 'utf8');
   const callbacks = await readFile(new URL('../lib/bot/features/preview-callbacks.js', import.meta.url), 'utf8');
