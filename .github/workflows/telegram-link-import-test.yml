@@ -28,7 +28,26 @@ jobs:
           console.log('PARSED', JSON.stringify(parsed));
           const preview = await fetchPublicTelegramPreview(parsed);
           console.log('PREVIEW', JSON.stringify(preview, null, 2));
-          if (!preview || (!preview.text && !preview.media?.length && !preview.document)) {
-            throw new Error('Live Telegram post returned no usable content');
-          }
+          NODE
+      - name: Inspect raw Telegram embed markup
+        run: |
+          node --input-type=module <<'NODE'
+          const url = 'https://t.me/free3dsky/29983?embed=1&single=1&mode=tme';
+          const r = await fetch(url, {
+            redirect: 'follow',
+            headers: {
+              'user-agent': 'Mozilla/5.0 (compatible; AbangRenderTelegramImporter/1.0)',
+              accept: 'text/html,application/xhtml+xml',
+            },
+          });
+          const html = await r.text();
+          console.log('HTTP', r.status, 'LEN', html.length);
+          const interesting = html
+            .split(/\n/)
+            .filter((line) => /tgme_widget_message|document|photo|video|audio|download|cdn|file|message_text|js-message/i.test(line));
+          console.log('INTERESTING_LINES_START');
+          console.log(interesting.join('\n').slice(0, 30000));
+          console.log('INTERESTING_LINES_END');
+          const urls = [...html.matchAll(/https?:\/\/[^"'<>\s)]+/g)].map((m) => m[0]);
+          console.log('URLS', JSON.stringify([...new Set(urls)].slice(0, 100), null, 2));
           NODE
