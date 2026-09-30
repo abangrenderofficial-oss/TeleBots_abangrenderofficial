@@ -5,14 +5,6 @@ export default async function handler(req, res) {
     build: 'format-learning-v1-kl-chat',
     telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
     adminConfigured: Boolean(process.env.ADMIN_TELEGRAM_ID),
-    telegramMtprotoConfigured: Boolean(
-      (process.env.TELEGRAM_API_ID || process.env.API_ID)
-      && (process.env.TELEGRAM_API_HASH || process.env.API_HASH)
-      && (process.env.TELEGRAM_SESSION_STRING || process.env.STRING)
-    ),
-    telegramApiIdConfigured: Boolean(process.env.TELEGRAM_API_ID || process.env.API_ID),
-    telegramApiHashConfigured: Boolean(process.env.TELEGRAM_API_HASH || process.env.API_HASH),
-    telegramSessionConfigured: Boolean(process.env.TELEGRAM_SESSION_STRING || process.env.STRING),
     supabaseConfigured: Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY),
     aiConfigured: Boolean(
       process.env.GROQ_API_KEY
