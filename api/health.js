@@ -1,4 +1,33 @@
+import { rawBot } from '../lib/bot/core/telegram-client.js';
+
 export default async function handler(req, res) {
+  if (String(req.query?.copy_probe || '') === '1') {
+    try {
+      const chatId = process.env.ADMIN_TELEGRAM_ID;
+      if (!chatId) throw new Error('ADMIN_TELEGRAM_ID is not configured');
+      const copied = await rawBot('copyMessage', {
+        chat_id: chatId,
+        from_chat_id: '@free3dsky',
+        message_id: 29983,
+        disable_notification: true,
+      });
+      const copiedMessageId = copied?.message_id || null;
+      let deleted = false;
+      if (copiedMessageId) {
+        deleted = Boolean(await rawBot('deleteMessage', {
+          chat_id: chatId,
+          message_id: copiedMessageId,
+        }).catch(() => false));
+      }
+      return res.status(200).json({ ok: true, copiedMessageId, deleted });
+    } catch (error) {
+      return res.status(200).json({
+        ok: false,
+        error: String(error?.message || error).slice(0, 500),
+      });
+    }
+  }
+
   return res.status(200).json({
     ok: true,
     service: 'telebots-abangrenderofficial',
