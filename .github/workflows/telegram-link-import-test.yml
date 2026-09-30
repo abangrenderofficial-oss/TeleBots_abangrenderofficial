@@ -1,0 +1,34 @@
+name: Telegram link importer test
+
+on:
+  push:
+    branches:
+      - feature/telegram-link-import
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+      - name: Run existing test suite
+        run: npm test
+      - name: Probe live Telegram post
+        run: |
+          node --input-type=module <<'NODE'
+          import { extractTelegramPostLink, fetchPublicTelegramPreview } from './lib/bot/features/telegram-link-import.js';
+          const url = 'https://t.me/free3dsky/29983';
+          const parsed = extractTelegramPostLink(url);
+          console.log('PARSED', JSON.stringify(parsed));
+          const preview = await fetchPublicTelegramPreview(parsed);
+          console.log('PREVIEW', JSON.stringify(preview, null, 2));
+          if (!preview || (!preview.text && !preview.media?.length && !preview.document)) {
+            throw new Error('Live Telegram post returned no usable content');
+          }
+          NODE
