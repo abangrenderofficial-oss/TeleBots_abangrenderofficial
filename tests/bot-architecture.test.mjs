@@ -24,6 +24,9 @@ const expectedCommands = [
   'start',
   'stats',
   'stop',
+  'tgcancel',
+  'tglogin',
+  'tglogout',
   'total',
   'version',
   'whoami',
@@ -53,7 +56,7 @@ test('each command domain has its own owner module', async () => {
     'menu.js', 'help.js', 'whoami.js', 'version.js', 'aitest.js', 'stats.js',
     'total.js', 'pending.js', 'memories.js', 'remember.js', 'forget.js',
     'clearchat.js', 'setcaption.js', 'formats.js', 'stop.js', 'resume.js', 'resetbatch.js',
-    'recaption.js', 'connect.js',
+    'recaption.js', 'connect.js', 'tglogin.js', 'tglogout.js',
   ];
   await Promise.all(files.map((file) => access(new URL(`../lib/bot/commands/${file}`, import.meta.url))));
 });

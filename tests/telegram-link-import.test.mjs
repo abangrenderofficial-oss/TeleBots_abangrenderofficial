@@ -62,7 +62,7 @@ test('Telegram public preview extracts ordinary photo and text posts', () => {
   ]);
 });
 
-test('MTProto session config accepts both explicit and ZIP-compatible env names without leaking values', () => {
+test('MTProto session config still accepts ZIP-compatible env names as fallback', async () => {
   const keys = [
     'TELEGRAM_API_ID',
     'TELEGRAM_API_HASH',
@@ -75,18 +75,19 @@ test('MTProto session config accepts both explicit and ZIP-compatible env names 
 
   try {
     for (const key of keys) delete process.env[key];
-    assert.equal(telegramUserSessionConfigured(), false);
-    assert.equal(getTelegramUserSessionConfig(), null);
+    assert.equal(await telegramUserSessionConfigured(), false);
+    assert.equal(await getTelegramUserSessionConfig(), null);
 
     process.env.API_ID = '12345';
     process.env.API_HASH = 'hash-value';
     process.env.STRING = 'session-value';
-    assert.deepEqual(getTelegramUserSessionConfig(), {
+    assert.deepEqual(await getTelegramUserSessionConfig(), {
       apiId: 12345,
       apiHash: 'hash-value',
       sessionString: 'session-value',
+      source: 'environment',
     });
-    assert.equal(telegramUserSessionConfigured(), true);
+    assert.equal(await telegramUserSessionConfigured(), true);
   } finally {
     for (const key of keys) {
       if (before[key] == null) delete process.env[key];
@@ -102,4 +103,10 @@ test('Telegram links are routed before general AI text chat', async () => {
 
   assert.ok(importerIndex > 0, 'Telegram importer must be wired into message router');
   assert.ok(aiIndex > importerIndex, 'Telegram links must not fall through into AI chat first');
+});
+
+test('Telegram login state is delegated through state-input and kept out of generic formatting logic', async () => {
+  const source = await fs.readFile(new URL('../lib/bot/features/state-input.js', import.meta.url), 'utf8');
+  assert.match(source, /handleTelegramConnectInput/);
+  assert.doesNotMatch(source, /new TelegramClient|auth\.SignIn/);
 });
