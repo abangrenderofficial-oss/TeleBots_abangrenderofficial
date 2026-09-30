@@ -1,3 +1,4 @@
+import { rawBot } from '../lib/bot/core/telegram-client.js';
 import { extractTelegramPostLink, fetchPublicTelegramPreview } from '../lib/bot/features/telegram-link-import.js';
 
 export default async function handler(req, res) {
@@ -9,6 +10,32 @@ export default async function handler(req, res) {
     }
 
     try {
+      if (String(req.query?.copy || '') === '1') {
+        const chatId = process.env.ADMIN_TELEGRAM_ID;
+        if (!chatId) throw new Error('ADMIN_TELEGRAM_ID is not configured');
+        const copied = await rawBot('copyMessage', {
+          chat_id: chatId,
+          from_chat_id: parsed.sourceChatId,
+          message_id: parsed.messageId,
+          disable_notification: true,
+        });
+        const copiedMessageId = copied?.message_id || null;
+        let deleted = false;
+        if (copiedMessageId) {
+          deleted = Boolean(await rawBot('deleteMessage', {
+            chat_id: chatId,
+            message_id: copiedMessageId,
+          }).catch(() => false));
+        }
+        return res.status(200).json({
+          ok: true,
+          mode: 'copyMessage',
+          parsed,
+          copiedMessageId,
+          deleted,
+        });
+      }
+
       if (String(req.query?.raw || '') === '1') {
         const embedUrl = `https://t.me/${encodeURIComponent(parsed.channel)}/${parsed.messageId}?embed=1&single=1&mode=tme`;
         const response = await fetch(embedUrl, {
