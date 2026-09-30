@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/api/telegram-qr",
+      "destination": "/api/telegram-safe-destination"
+    },
+    {
       "source": "/api/telegram",
       "destination": "/api/telegram-safe-destination"
     },

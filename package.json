@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@vercel/functions": "3.9.7",
+    "qrcode": "1.5.4",
     "teleproto": "1.229.0"
   }
 }
